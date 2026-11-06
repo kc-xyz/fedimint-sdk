@@ -1,0 +1,112 @@
+# Fedimint SDK for React Native
+
+> Add ecash to a React Native wallet with the Fedimint npm packages: install them, join a federation, show a balance, receive and send ecash and Lightning, list history, share the session with React hooks, and restore from seed words.
+
+## Getting started
+
+- [Welcome](md/index.md): What the SDK does, what is proven, and where to start.
+- [Quickstart](md/quickstart.md): From an empty app to a balance on screen in one page.
+- [Installation](md/installation.md): Install the two npm packages, link them on iOS and Android, and see the SDK answer on a device.
+
+## Guides
+
+- [Join a federation](md/join.md): Read an invite code, preview a federation, join it, and reconnect on every launch.
+- [Show a balance](md/balance.md): Read the balance once, then follow it as it changes.
+- [Receive money](md/receive.md): Redeem ecash, and create and watch a Lightning invoice.
+- [Send money](md/send.md): Quote and send ecash, take it back, and pay a Lightning invoice.
+- [See the history](md/history.md): Page through operations and turn each one into a row.
+- [Share the session](md/session.md): Open the SDK once in a module your app owns, share the session, and follow it with hooks.
+- [Restore from seed words](md/restore.md): Open a wallet from seed words and recover each federation.
+
+## Reference
+
+- [Errors](md/errors.md): Exception and its codes, and how to explain a failure.
+- [Amounts](md/amounts.md): Units, conversion, and the amount types.
+- [Seed words](md/seed-words.md): Open the wallet once, and show the seed words only to their owner.
+
+## API
+
+- [Overview](md/api.md): Every method the guides use, in groups, with a link to a page for each.
+
+### Session
+
+- [openSdk()](md/api-session-opensdk.md): Opens the SDK on a data directory and gives you a session.
+- [close()](md/api-session-close.md): Shuts down the SDK and destroys it.
+- [useSession()](md/api-session-usesession.md): Gives the session from the nearest SessionProvider.
+- [useBalance()](md/api-session-usebalance.md): A React hook that follows the balance of a federation.
+- [useOperation()](md/api-session-useoperation.md): A React hook that follows the state of an operation.
+
+### Sdk
+
+- [preview()](md/api-sdk-preview.md): Looks up a federation from its invite code.
+- [join()](md/api-sdk-join.md): Joins a federation.
+- [recover()](md/api-sdk-recover.md): Joins a federation again and restores its funds from the seed.
+- [resumeRecovery()](md/api-sdk-resumerecovery.md): Continues the recovery of a federation.
+- [recoveryStatus()](md/api-sdk-recoverystatus.md): Reads the recovery state of a federation.
+- [federation()](md/api-sdk-federation.md): Looks up an open federation by its id.
+- [federations()](md/api-sdk-federations.md): Lists the open federations.
+- [storedFederations()](md/api-sdk-storedfederations.md): Lists every federation in storage, running or not.
+- [reopenFederation()](md/api-sdk-reopenfederation.md): Starts a stored federation again, without an invite code.
+- [exportMnemonic()](md/api-sdk-exportmnemonic.md): Gives the seed phrase object of the wallet.
+
+### Federation
+
+- [id()](md/api-federation-id.md): Gives the id of this federation.
+- [name()](md/api-federation-name.md): Gives the name from the configuration of the federation.
+- [network()](md/api-federation-network.md): Gives the Bitcoin network of the federation.
+- [balance()](md/api-federation-balance.md): Reads the balance of the federation once.
+- [balanceUpdates()](md/api-federation-balanceupdates.md): Opens a new cursor on the balance.
+- [activity()](md/api-federation-activity.md): Reads one page of the local history.
+- [operation()](md/api-federation-operation.md): Looks up one operation by its id.
+- [ecash()](md/api-federation-ecash.md): Gives the ecash facade.
+- [lightning()](md/api-federation-lightning.md): Gives the Lightning facade.
+- [capabilities()](md/api-federation-capabilities.md): Tells what the federation can do.
+- [inviteCode()](md/api-federation-invitecode.md): Gives an invite code that you can share.
+- [meta()](md/api-federation-meta.md): Gives the metadata of the federation.
+- [onchain()](md/api-federation-onchain.md): Gives the on-chain facade.
+
+### Ecash
+
+- [quote()](md/api-ecash-quote.md): Plans a send of ecash.
+- [send()](md/api-ecash-send.md): Runs a quote and makes the notes to hand over.
+- [receive()](md/api-ecash-receive.md): Redeems ecash notes.
+- [requestedAmount()](md/api-ecash-requestedamount.md): Gives the amount that was asked for.
+- [notesValue()](md/api-ecash-notesvalue.md): Gives the value of the notes in the quote.
+- [fee()](md/api-ecash-fee.md): Gives the fee of the quote.
+- [total()](md/api-ecash-total.md): Gives the total cost of the quote.
+
+### Lightning
+
+- [quote()](md/api-lightning-quote.md): Plans the payment of an invoice.
+- [send()](md/api-lightning-send.md): Pays the invoice of a quote.
+- [receive()](md/api-lightning-receive.md): Creates an invoice that the wallet can get paid on.
+- [invoiceAmount()](md/api-lightning-invoiceamount.md): Gives the amount of the invoice.
+- [fee()](md/api-lightning-fee.md): Gives the fee of the payment.
+- [total()](md/api-lightning-total.md): Gives the total cost of the payment.
+
+### Operation
+
+- [state()](md/api-operation-state.md): Reads the current state of the operation.
+- [updates()](md/api-operation-updates.md): Opens a cursor on the states of the operation.
+- [awaitFinal()](md/api-operation-awaitfinal.md): Waits for the final state of the operation.
+- [requestCancel()](md/api-operation-requestcancel.md): Asks to take back the ecash of a send.
+- [asEcashSend()](md/api-operation-asecashsend.md): Turns an untyped operation into an ecash send handle.
+- [kind()](md/api-operation-kind.md): Tells the kind of an operation.
+- [details()](md/api-operation-details.md): Reads the details of an ecash send.
+
+### Values
+
+- [parse()](md/api-values-invitecode-parse.md): Checks an invite code string and gives you a checked invite code.
+- [federationId()](md/api-values-invitecode-federationid.md): Reads the federation id from the invite code.
+- [parse()](md/api-values-notes-parse.md): Checks an ecash string and gives you checked notes.
+- [value()](md/api-values-notes-value.md): Reads the value inside the notes.
+- [display()](md/api-values-notes-display.md): Gives the string to hand over.
+- [words()](md/api-values-mnemonic-words.md): Reads the seed words.
+
+### Errors (Exception)
+
+- [hasInner()](md/api-errors-hasinner.md): Tells whether a caught value carries an SDK Exception.
+- [getInner()](md/api-errors-getinner.md): Gives the Exception inside a caught value.
+- [code()](md/api-errors-code.md): Gives the stable error code.
+- [reason()](md/api-errors-reason.md): Gives the human message.
+- [details()](md/api-errors-details.md): Gives the structured detail of the failure, where there is any.
