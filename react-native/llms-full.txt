@@ -1,0 +1,4382 @@
+# Fedimint SDK for React Native: the full guide
+
+# Add ecash and Lightning to the app you already have
+
+Join a federation, hold ecash, send and receive it, and restore from seed words, with one typed SDK.
+
+```sh
+npm install --save-exact @fedimint/react-native@0.1.0 @fedimint/react-native-bindings@0.1.0
+cd ios && pod install
+```
+
+```tsx
+const session = await openSdk({ dataDir })
+const fed = await session.sdk.join(InviteCode.parse(code))
+const msat = useBalance(fed)
+return <Text>{`${msat / 1000n} sats`}</Text>
+```
+
+## What is Fedimint
+
+[Fedimint](https://fedimint.org) is an open source protocol that lets a group of guardians, a _federation_, hold bitcoin together for a community. The federation issues **ecash**: digital notes, backed by that bitcoin, that your wallet keeps on the device. Ecash payments are fast, cheap and private, and a Lightning gateway connects them to the Lightning Network.
+
+In short: your app holds ecash and talks to one federation. The federation reaches Lightning through a gateway. Your app can also give notes straight to another wallet.
+
+## What this SDK does
+
+This guide follows one path, from an empty project to a wallet that joins a federation, holds ecash, moves it two ways, lists its history and restores itself from seed words. It uses two npm packages. You import everything from `@fedimint/react-native`. It adds `openSdk` and two React hooks, `useBalance` and `useOperation`. `@fedimint/react-native-bindings` holds the native part, generated from the Rust crate `rust/fedimint-sdk`. Your app lists both.
+
+The packages ship prebuilt native libraries for iOS 15.0 or newer and Android API 24 or newer. Nothing compiles when you install them. They need the New Architecture, and they do not run in Expo Go. Expo apps use a config plugin and a development build.
+
+Amounts are millisatoshis (msat), as a `bigint`. A failed payment is a state that you observe, not an error that is thrown. Every code block in this guide is compiled against the packages before it is published here.
+
+This guide does not cover on chain send and receive. A federation that supports them gives you `fed.onchain()`.
+
+## Where to start
+
+- [**Quickstart**](quickstart.md): From an empty app to a balance on screen in one page.
+- [**Guides**](join.md): One task each: join, balance, receive, send, history, share the session, restore.
+- [**Reference**](errors.md): Errors, amounts, and seed words.
+
+## For AI agents
+
+An agent can follow this guide from start to end. Every page is also plain Markdown. Give the agent one of these files:
+
+- [**llms-full.txt**](/react-native/llms-full.txt): Every page in one file. Use this one first.
+- [**llms.txt**](/react-native/llms.txt): The list of pages, with a link to each page as Markdown.
+- <a href="/react-native/md/quickstart.md" target="_blank"><strong>md/quickstart.md</strong></a>: One page as plain Markdown. Every page has one, at `md/<page>.md`.
+- [**SKILL.md**](https://github.com/fedimint/fedimint-sdk/blob/main/skills/fedimint-react-native-install/SKILL.md): An agent skill for a first install in an existing app: checks, safety rules, failures and a definition of done.
+
+Then give the agent this prompt:
+
+```text
+Read llms-full.txt from the Fedimint SDK for React Native guide.
+Add the SDK to this React Native app. Follow the pages in order,
+from Installation to Restore from seed words. Install the exact
+package versions that the guide gives. Make sure that each step
+works before you start the next one.
+```
+
+## The pages
+
+- [Quickstart](quickstart.md)
+- [Installation](installation.md)
+- [Join a federation](join.md)
+- [Show a balance](balance.md)
+- [Receive money](receive.md)
+- [Send money](send.md)
+- [See the history](history.md)
+- [Share the session](session.md)
+- [Restore from seed words](restore.md)
+- [Errors](errors.md)
+- [Amounts](amounts.md)
+- [Seed words](seed-words.md)
+
+---
+
+# Quickstart
+
+From an empty React Native app to a federation balance on screen.
+
+- Proven: iOS 15.0 and Android API 24 or newer
+- Proven: prebuilt native libraries
+- Proven: New Architecture required
+- Not yet: not available in Expo Go
+
+This page is the short path. It joins Fedi Testnet, a test federation on signet, and shows its balance. Each step links to the page with the full detail and the reasons.
+
+### 01 · Install the two packages
+
+Add both packages at the same exact version. Your app must list both, because autolinking links only the packages your app names. The packages ship prebuilt native libraries, so nothing compiles at install. The screen below also uses `react-native-fs` to find the documents folder.
+
+`install.sh`
+
+```sh
+npm install --save-exact @fedimint/react-native@0.1.0 @fedimint/react-native-bindings@0.1.0
+npm install react-native-fs
+ls node_modules/@fedimint/
+```
+
+Install the iOS pods. For Android, build only the two ABIs the packages ship. Set them in `android/gradle.properties`.
+
+`pods.sh`
+
+```sh
+cd ios
+export LANG=en_US.UTF-8
+bundle exec pod install
+```
+
+`android/gradle.properties`
+
+```properties
+reactNativeArchitectures=arm64-v8a,x86_64
+```
+
+With Expo, add the config plugin and make a development build instead. [Installation step 03](installation.md#step-03) shows how. [Installation](installation.md) has every step, and what to do when one fails.
+
+You will see `react-native` and `react-native-bindings` in `node_modules/@fedimint/`, and `Pod installation complete!`.
+
+### 02 · Write the screen
+
+Replace `App.tsx` with this file. It does four things:
+
+1. `openWallet` opens the data folder once for the whole app. A second open of the same folder fails with `StorageInUse`. The first open of an empty folder creates the seed. [Share the session](session.md) has the full detail.
+2. `connectTestnet` parses the invite code. Then it reconnects to the federation if this device holds it, or joins it on the first launch. [Join a federation](join.md) has the full detail.
+   `connectWallet` runs the open and the connect once. React can run an effect twice, and a second `join` would fail with `AlreadyJoined`.
+3. `useBalance` returns the balance in msat, as a `bigint`. It is `undefined` until the first value arrives. Then it stays current. [Show a balance](balance.md) has the full detail.
+4. `explain` turns a failure into its error code and reason. [Errors](errors.md) has the full detail.
+
+`App.tsx`
+
+```tsx
+import React, { useEffect, useState } from 'react'
+import { SafeAreaView, Text } from 'react-native'
+import RNFS from 'react-native-fs'
+import {
+  ErrorCode,
+  Exception,
+  InviteCode,
+  openSdk,
+  useBalance,
+  type FederationLike,
+  type SdkSession,
+} from '@fedimint/react-native'
+
+// Fedi Testnet, a test federation on signet. Its money has no value.
+const TESTNET_INVITE =
+  'fed11qgqrgvnhwden5te0v9k8q6rp9ekh2arfdeukuet595cr2ttpd3jhq6rzve6zuer9wchxvetyd938gcewvdhk6tcqqysptkuvknc7erjgf4em3zfh90kffqf9srujn6q53d6r056e4apze5cw27h75'
+
+let opening: Promise<SdkSession> | undefined
+
+/** The one session for the whole app. Every caller gets the same promise. */
+function openWallet(): Promise<SdkSession> {
+  // A plain path, not a file:// URI.
+  const dataDir = `${RNFS.DocumentDirectoryPath}/fedimint`
+  opening ??= openSdk({ dataDir }).catch((err: unknown) => {
+    opening = undefined // let the next caller try again
+    throw err
+  })
+  return opening
+}
+
+/** Reconnect to Fedi Testnet if this device holds it. Join it on the first launch. */
+async function connectTestnet(session: SdkSession): Promise<FederationLike> {
+  const { sdk } = session
+  const invite = InviteCode.parse(TESTNET_INVITE.trim())
+  const id = invite.federationId()
+  const stored = sdk.storedFederations().some((f) => f.id === id)
+  return (
+    sdk.federation(id) ??
+    (stored ? await sdk.reopenFederation(id) : await sdk.join(invite))
+  )
+}
+
+let connecting: Promise<FederationLike> | undefined
+
+/** Open and connect once. A second call, such as an effect that runs twice, gets the same promise. */
+function connectWallet(): Promise<FederationLike> {
+  connecting ??= openWallet()
+    .then(connectTestnet)
+    .catch((err: unknown) => {
+      connecting = undefined // let the next caller try again
+      throw err
+    })
+  return connecting
+}
+
+function explain(e: unknown): string {
+  if (!Exception.hasInner(e)) return String(e)
+  const inner = Exception.getInner(e)
+  return `${ErrorCode[inner.code()]}: ${inner.reason()}`
+}
+
+export default function App() {
+  const [fed, setFed] = useState<FederationLike>()
+  const [error, setError] = useState<string>()
+
+  useEffect(() => {
+    let cancelled = false
+    connectWallet().then(
+      (f) => {
+        if (!cancelled) setFed(f)
+      },
+      (e: unknown) => {
+        if (!cancelled) setError(explain(e))
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // undefined until the first value arrives, then the balance in msat, kept current.
+  const msat = useBalance(fed, (e) => setError(explain(e)))
+
+  const line =
+    error !== undefined
+      ? `FAILED: ${error}`
+      : msat === undefined
+        ? 'loading...'
+        : `${msat / 1000n} sats`
+
+  return (
+    <SafeAreaView style={{ padding: 24 }}>
+      <Text style={{ fontSize: 14 }}>{fed?.name() ?? 'Fedi Testnet'}</Text>
+      <Text style={{ fontSize: 32 }}>{line}</Text>
+    </SafeAreaView>
+  )
+}
+```
+
+You will see no errors from `npx tsc --noEmit`.
+
+### 03 · Run it
+
+Build and run. This is a full native build, because a new native library went in. A JavaScript reload is not enough.
+
+`run.sh`
+
+```sh
+npx react-native run-ios
+npx react-native run-android
+```
+
+The first launch joins Fedi Testnet. Later launches reconnect to it. To see the number change, pay the wallet from a signet faucet. [Receive money](receive.md) shows how to make an invoice.
+
+You will see the federation name and `0 sats`. If you see `FAILED:`, the line names the error code. [Installation](installation.md#troubleshooting) lists the common ones.
+
+## Next
+
+- [Receive money](receive.md)
+- [Send money](send.md)
+- [Share the session](session.md)
+
+---
+
+# Installation
+
+Add both packages, set up each platform, and see the SDK answer on a device.
+
+- Proven: prebuilt native libraries
+- Proven: iOS 15.0 and Android API 24 or newer
+- Proven: Expo config plugin
+- Not yet: not available in Expo Go
+
+By the end of this page your wallet will show one line of text: a Rust program inside your app has stored a seed. That is a small result, and it is the right first result, because it proves every layer at once. If the line appears, both packages resolved, the native library linked, the bridge loaded and the Rust core answered.
+
+**These packages contain compiled Rust, so they cannot run inside Expo Go.** Expo Go ships a fixed set of native libraries and yours is not one of them.
+
+Use a development build instead. Step 03 shows the Expo path: a config plugin, `npx expo prebuild`, and a development build. A bare React Native project skips step 03.
+
+Everything else in Expo still works. The router, the asset pipeline, the config plugins and over the air updates are all unaffected. You give up one client app, not the framework.
+
+## Two packages, and why
+
+`@fedimint/react-native` is the package you import. It adds `openSdk`, which opens the SDK over a folder, and two React hooks, `useBalance` and `useOperation`. It also re-exports everything from the bindings, so every import in this guide comes from this one package.
+
+`@fedimint/react-native-bindings` is the native part. It is generated from the Rust crate `rust/fedimint-sdk`, and it holds the prebuilt native libraries, the podspec and the Android build. Nothing compiles when you install it. Your app must list it too, because React Native autolinks only the packages your app names directly. A native library that only another package depends on is never linked.
+
+| Item                              | Version           | Note                                                                |
+| --------------------------------- | ----------------- | ------------------------------------------------------------------- |
+| `@fedimint/react-native`          | `0.1.0`           | Install the exact version                                           |
+| `@fedimint/react-native-bindings` | `0.1.0`           | The same version as the package above                               |
+| React Native                      | `0.78` or newer   | `0.83` is recommended                                               |
+| React                             | `18` or newer     |                                                                     |
+| New Architecture                  | Required          | The bindings are a Turbo Module. There is no legacy bridge fallback |
+| iOS                               | `15.0` or newer   |                                                                     |
+| Android                           | API `24` or newer | ABIs `arm64-v8a` and `x86_64` only                                  |
+| Expo                              | SDK `52` or newer | Development build only, not Expo Go                                 |
+
+## The seven steps
+
+Steps 01 to 05 are setup and each one can fail loudly. Steps 06 and 07 are the payoff. Work in order. Every step ends with something you can check, so you never carry a broken state into the next one.
+
+### 01 · Check your toolchain
+
+Run these before you touch the project, because each failure below arrives later disguised as something else. You need no Rust toolchain: the native libraries come prebuilt.
+
+`check-toolchain.sh`
+
+```sh
+node --version        # 22.13 or newer
+ruby --version        # must match your project's .ruby-version
+xcodebuild -version   # 16.1 or newer, for iOS
+pod --version         # 1.13 or newer, for iOS
+java -version         # 17, for Android
+echo "LANG=$LANG"     # must not be empty
+```
+
+**If `LANG` is empty, fix it now:** `export LANG=en_US.UTF-8`, and add that line to your shell profile. CocoaPods will otherwise fail deep inside Ruby with `Unicode Normalization not appropriate for ASCII-8BIT`, which names Ruby internals and never mentions the locale.
+
+If `ruby --version` disagrees with the `.ruby-version` file in your project, install the pinned version with a version manager such as rbenv. If `pod` is missing, your project almost certainly has a `Gemfile`: run `bundle install`, then use `bundle exec pod` everywhere below.
+
+Three Ruby problems come up often:
+
+- If `rbenv install <version>` says `definition not found`, your ruby-build is too old. Run `brew upgrade ruby-build`, then install again.
+- If `bundle install` fails, install the Bundler version that `Gemfile.lock` names under `BUNDLED WITH`: `gem install bundler:<version>`.
+- In a non-interactive shell (CI, or an agent), rbenv is not active, so `ruby` is the macOS system Ruby. Run `eval "$(rbenv init - zsh)"` first, with `bash` in place of `zsh` in a bash shell. The name must match the shell, or the init fails with `complete: command not found`. Then check that `ruby -v` matches `.ruby-version`.
+
+For Android, set two environment variables. Set `JAVA_HOME` to a JDK 17 or newer. The JBR that comes with Android Studio works: `/Applications/Android Studio.app/Contents/jbr/Contents/Home`. Set `ANDROID_HOME` to your Android SDK folder. On macOS it is usually `~/Library/Android/sdk`. Then open the SDK Manager and install the NDK and CMake. Install the NDK version that `ndkVersion` names in your app's Android build files.
+
+You will see five versions and a locale that is not empty.
+
+### 02 · Add both packages to your app
+
+Install both packages at the same exact version. `--save-exact` writes the version into `package.json` with no range, so the two can never drift apart. The probe in step 06 also uses `react-native-fs` to find the documents folder. Skip that line if your app already has a file library.
+
+`install.sh`
+
+```sh
+npm install --save-exact @fedimint/react-native@0.1.0 @fedimint/react-native-bindings@0.1.0
+npm install react-native-fs
+ls node_modules/@fedimint/
+```
+
+The bindings package is a download of several hundred megabytes. A slow install is not a hang. Wait for it to finish.
+
+You will see both packages:
+
+```sh
+$ ls node_modules/@fedimint/
+react-native react-native-bindings
+```
+
+### 03 · With Expo: add the plugin and prebuild
+
+Skip this step in a bare React Native project. With Expo SDK 52 or newer, add the config plugin to `app.json`. On Android it turns on AndroidX and the New Architecture. On iOS it does nothing.
+
+`app.json`
+
+```json
+{
+  "expo": {
+    "plugins": ["@fedimint/react-native"]
+  }
+}
+```
+
+If `app.json` already has a `plugins` list, add the entry to it. Then generate the native projects and make a development build. The development build replaces Expo Go on your device or simulator.
+
+`expo-prebuild.sh`
+
+```sh
+npx expo prebuild
+npx expo run:ios
+npx expo run:android
+```
+
+`npx expo prebuild` runs `pod install` for you, so an Expo project skips step 04. It still needs step 05. Set the ABIs again after `npx expo prebuild --clean`, because that command writes a new `android` folder.
+
+You will see new `ios` and `android` folders, and your app opens in its own development build, not in Expo Go.
+
+### 04 · Install the iOS pods
+
+Autolinking finds the bindings on its own, because your app lists them. You do not edit the `Podfile`. `pod install` runs in the `ios` folder, not in the project root. Set `LANG` first, as step 01 says.
+
+`pods.sh`
+
+```sh
+cd ios
+export LANG=en_US.UTF-8
+bundle exec pod install --repo-update
+```
+
+The `--repo-update` flag refreshes the CocoaPods spec index. Use it for the first install. Without it, an old cached index can fail the install.
+
+Two pods arrive together. `ReactNativeBindings` holds the native library. `uniffi-bindgen-react-native` is the runtime that carries values across the boundary between JavaScript and Rust. CocoaPods does not take this second pod from `node_modules`. The `ReactNativeBindings` podspec asks for it by version, and CocoaPods downloads it from the CocoaPods trunk. `@fedimint/react-native` adds no pod, because it has no native code.
+
+Your `Podfile.lock` will name both:
+
+```text
+ReactNativeBindings
+uniffi-bindgen-react-native
+```
+
+If they are missing, the package was not found. Ask the tooling what it can see before you change anything:
+
+`check-autolink.sh`
+
+```sh
+npx react-native config | grep -A3 react-native-bindings
+```
+
+### 05 · Set the Android ABIs
+
+The bindings ship native libraries for two Android ABIs only: `arm64-v8a` for phones and for emulators on Apple silicon Macs, and `x86_64` for emulators on Intel hosts. Tell Gradle to build only those two. Find the `reactNativeArchitectures` line in `android/gradle.properties` and replace it, or add it if it is missing.
+
+`android/gradle.properties`
+
+```properties
+reactNativeArchitectures=arm64-v8a,x86_64
+```
+
+There is no other Android step. Gradle picks the package up through autolinking on the next build.
+
+You will see the one line:
+
+```sh
+$ grep reactNativeArchitectures android/gradle.properties
+reactNativeArchitectures=arm64-v8a,x86_64
+```
+
+### 06 · Call the SDK
+
+This screen is a probe. It opens the SDK and asks how many seed words it holds. It joins nothing and talks to no network. Create the file whole.
+
+Four things here will surprise you if you are coming from an ordinary library:
+
+1. `openSdk` takes a `dataDir`, because the SDK owns a database on disk. Your app chooses where it lives. Give a plain path, not a `file://` URI. `RNFS.DocumentDirectoryPath` is already a plain path.
+2. The first open of an empty folder creates a seed and stores it. Every later open reads the same seed back. You never generate one yourself.
+3. The probe counts the words and never shows them. Seed words are shown only to their owner, on a screen they asked for. [Seed words](seed-words.md) has that screen.
+4. `session.close()` is required. It gives the folder back. Until then, a second open of the same folder fails with `StorageInUse`. So a remount waits for the last close before it opens.
+
+`screen/wallets/FedimintDebug.tsx`
+
+```tsx
+import React, { useEffect, useState } from 'react'
+import { SafeAreaView, Text, View } from 'react-native'
+import RNFS from 'react-native-fs'
+import { ErrorCode, Exception, openSdk } from '@fedimint/react-native'
+
+/** The error code and reason of a failure from the core, or the plain message. */
+function explain(e: unknown): string {
+  if (!Exception.hasInner(e)) return String(e)
+  const inner = Exception.getInner(e)
+  return `${ErrorCode[inner.code()]}: ${inner.reason()}`
+}
+
+// The last screen's close. The next open waits for it, or it fails with StorageInUse.
+let closing: Promise<void> = Promise.resolve()
+
+export default function FedimintDebug() {
+  const [status, setStatus] = useState<string>('calling the rust core...')
+
+  useEffect(() => {
+    let cancelled = false
+
+    // Your app owns this path. Use the real documents directory from the start:
+    // a simulator shortcut such as /tmp would not survive on a device.
+    const dataDir = `${RNFS.DocumentDirectoryPath}/fedimint`
+
+    const opening = closing.then(() => openSdk({ dataDir }))
+    opening
+      .then((opened) => {
+        if (cancelled) return
+        // Count the words. Never put them on a debug screen, and never log them.
+        const count = opened.sdk.exportMnemonic().words().length
+        setStatus(`the rust core answered: a ${count} word seed is stored`)
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setStatus('FAILED: ' + explain(e))
+      })
+
+    // Gives the folder back, even if the open is still running. The cancelled
+    // flag stops a late reply from setting state on a screen that has already gone.
+    return () => {
+      cancelled = true
+      closing = opening.then((s) => s.close()).catch(() => undefined)
+    }
+  }, [])
+
+  return (
+    <SafeAreaView>
+      <View style={{ padding: 24 }}>
+        <Text style={{ fontSize: 12, letterSpacing: 2, marginBottom: 12 }}>
+          FEDIMINT DEBUG
+        </Text>
+        <Text style={{ fontSize: 18, lineHeight: 26 }}>{status}</Text>
+      </View>
+    </SafeAreaView>
+  )
+}
+```
+
+Then register the screen in your navigator, the same way you register any other. The SDK has no opinion about navigation.
+
+TypeScript will accept the file with no errors:
+
+```sh
+$ npx tsc --noEmit
+no output, exit 0
+```
+
+### 07 · See the core answer
+
+Build and run. This is a full native build, because a new native library went in, so expect minutes rather than seconds. A JavaScript reload is not enough. With Expo, use `npx expo run:ios` or `npx expo run:android` instead.
+
+`run.sh`
+
+```sh
+npx react-native run-ios
+npx react-native run-android
+```
+
+Open the debug screen. It will say that a 12 word seed is stored. Open it a second time and it says the same: the seed was written once, on the first open, and read on the second.
+
+### If the screen says FAILED, or the build stops
+
+Read the message before you change anything. A failure from the core reaches JavaScript as an error that is not an `instanceof Exception`. The probe reads it with `Exception.hasInner(e)`, then `Exception.getInner(e).code()` and `.reason()`. The code is a number. `ErrorCode[code]` gives its name, such as `StorageInUse`. [Errors](errors.md) lists every code. These cover almost every case.
+
+```text
+TurboModuleRegistry.getEnforcing(...): 'ReactNativeBindings' could not be found
+    The native side did not load. Your app does not list the bindings (step 02),
+    pod install did not run after that (step 04), the New Architecture is off,
+    or you ran an old build. Rebuild. A JavaScript reload cannot fix this.
+
+Invalid hook call
+    Two copies of React. Run npm ls react. Every entry must be your app's
+    copy, marked deduped. If another version shows, pin react to your app's
+    version with an overrides entry in package.json, then install again.
+
+None of your spec sources contain a spec satisfying the dependency: uniffi-bindgen-react-native
+    CocoaPods has an old cached index and does not know the pod version. Run
+    bundle exec pod install --repo-update in the ios folder (step 04).
+
+FAILED: StorageInUse: ...
+    The folder is already open. Something opened the SDK twice, often a fast
+    refresh while the first session was still open. Open it once per app
+    (Share the session), and close the session before you open it again.
+```
+
+## What you just did
+
+You added both packages at one exact version, set up iOS and Android, and called across three languages to get an answer back. Nothing on this page talked to a network. The seed was written once, on the first open, into the folder you named.
+
+You also met the rules that shape every later page. The SDK owns a folder, so it needs a path. It remembers, so a seed is written once and read afterwards. It holds the folder until you close the session. And the seed words are the money, so they are never logged and never shown to anybody but their owner.
+
+[Share the session](session.md) goes back to `openSdk` and shows how to open once for the whole app. [Seed words](seed-words.md) shows the seed words safely.
+
+---
+
+# Join a federation
+
+Read an invite code, show the user what they are joining, then join and reconnect on every launch.
+
+- Proven: parsing a code needs no network
+- Proven: preview writes nothing to storage
+- Not yet: leaving needs a zero balance
+
+A federation is a group of guardians who between them issue the ecash your wallet will hold. Joining one asks the guardians for their configuration and writes it to the wallet's folder. After this page your wallet has somewhere to keep money.
+
+Leaving is hard. `sdk.forgetFederation(id)` erases a federation only when it holds no money and has no pending operation. So a screen that joins should show the user what they are joining first. That is why the preview comes before the join.
+
+**Practise on money that is not real.** Fedi Testnet runs on signet, where coins have no value. Pay it from a signet faucet. Its invite code is: `fed11qgqrgvnhwden5te0v9k8q6rp9ekh2arfdeukuet595cr2ttpd3jhq6rzve6zuer9wchxvetyd938gcewvdhk6tcqqysptkuvknc7erjgf4em3zfh90kffqf9srujn6q53d6r056e4apze5cw27h75`
+
+### 01 · Reject a bad code without a network call
+
+An invite code is a string that starts with `fed1`. `InviteCode.parse` reads it on the device, with no network call. Call it as soon as the user pastes or scans, and tell them at once if the code is bad.
+
+`read-invite.ts`
+
+```ts
+import {
+  ErrorCode,
+  Exception,
+  InviteCode,
+  type InviteCodeLike,
+} from '@fedimint/react-native'
+
+/** The parsed invite, or null when the pasted text is not a code. No network. */
+export function readInvite(pasted: string): InviteCodeLike | null {
+  try {
+    // parse does not trim. Remove the spaces and line breaks a paste brings with it.
+    return InviteCode.parse(pasted.trim())
+  } catch (err) {
+    if (
+      Exception.hasInner(err) &&
+      Exception.getInner(err).code() === ErrorCode.InvalidInput
+    ) {
+      return null
+    }
+    throw err
+  }
+}
+```
+
+A code that does not parse throws an error with the code `ErrorCode.InvalidInput`. The error is not an `instanceof` any class, so read its code with `Exception.hasInner` and `Exception.getInner`. [`invite.federationId()`](api-values-invitecode-federationid.md) gives the federation's id, and `invite.display()` gives the code back as a string.
+
+`readInvite('hello')` returns `null`. `readInvite` with the Fedi Testnet code returns an invite, and its `federationId()` is a 64 character hex string.
+
+### 02 · Show the user what they are about to join
+
+`sdk.preview(invite)` asks the guardians for the federation's configuration. It writes nothing to storage, so it is safe to call on a code the user has not agreed to yet. It also checks that this SDK can use the federation. A federation it cannot use fails here with `UnsupportedFederation`, not later at the join.
+
+`preview-federation.ts`
+
+```ts
+import {
+  Network,
+  type InviteCodeLike,
+  type SdkLike,
+} from '@fedimint/react-native'
+
+export async function previewForAScreen(sdk: SdkLike, invite: InviteCodeLike) {
+  // Asks the guardians for their configuration. Writes nothing.
+  const preview = await sdk.preview(invite)
+
+  return {
+    // undefined when the federation published no name. Do not invent one.
+    name: preview.name ?? `federation ${preview.id.slice(0, 8)}`,
+    // Other fields the federation published, as a Map of strings.
+    welcome: preview.meta.get('welcome_message'),
+    guardians: preview.guardians,
+    modules: preview.modules,
+    // Network.Bitcoin is real money. Signet, Testnet, Testnet4 and Regtest are not.
+    realMoney: preview.network === Network.Bitcoin,
+  }
+}
+```
+
+`preview.guardians` is the number of guardians. `preview.modules` lists the module names the federation runs, such as `mint`, `ln` and `wallet`.
+
+**Show the network.** `preview.network` says which chain this federation's money is on. `Network.Bitcoin` is real money. A test build should refuse it, and a real build should say so plainly before the user joins.
+
+With the Fedi Testnet code, you will see a name, a guardian count above zero, and `realMoney` set to `false`.
+
+### 03 · Join, then reconnect on every launch
+
+`sdk.join(invite)` returns the federation, open and ready. The invite is only needed for this first join. The wallet keeps the federation in its own folder, so your app does not need to save the invite.
+
+`join-federation.ts`
+
+```ts
+import type {
+  FederationLike,
+  InviteCodeLike,
+  SdkLike,
+} from '@fedimint/react-native'
+
+/** After the user said yes on the preview screen. */
+export async function joinFederation(
+  sdk: SdkLike,
+  invite: InviteCodeLike,
+): Promise<FederationLike> {
+  return sdk.join(invite)
+}
+```
+
+Joining a federation the wallet already holds fails with `AlreadyJoined`. On every later launch, use the function below. It lists the federations in the wallet's folder with [`sdk.storedFederations()`](api-sdk-storedfederations.md). It needs no saved invite. It returns `undefined` when the wallet holds no federation yet. Then show your Join screen.
+
+`federation-on-launch.ts`
+
+```ts
+import type { FederationLike, SdkLike } from '@fedimint/react-native'
+
+/** On every launch. Returns undefined when the wallet has not joined a federation. */
+export async function federationOnLaunch(
+  sdk: SdkLike,
+): Promise<FederationLike | undefined> {
+  const [stored] = sdk.storedFederations()
+  if (!stored) return undefined
+  return sdk.federation(stored.id) ?? (await sdk.reopenFederation(stored.id))
+}
+```
+
+| The federation is                       | `federationOnLaunch` does                                    |
+| --------------------------------------- | ------------------------------------------------------------ |
+| already open in this session            | `sdk.federation(id)` hands it back                           |
+| joined or restored before, not open yet | `sdk.reopenFederation(id)` opens it from the wallet's folder |
+| never joined                            | returns `undefined`                                          |
+
+`storedFederations()` lists every federation in the folder. A federation that `recover` restored is in the list too. This example takes the first one. A wallet that holds more than one federation picks by `id`.
+
+A federation answers a few questions without a network call: [`fed.id()`](api-federation-id.md), [`fed.name()`](api-federation-name.md), [`fed.network()`](api-federation-network.md), [`fed.inviteCode()`](api-federation-invitecode.md) and [`fed.capabilities()`](api-federation-capabilities.md). [`fed.ecash()`](api-federation-ecash.md), [`fed.lightning()`](api-federation-lightning.md) and [`fed.onchain()`](api-federation-onchain.md) return `undefined` when the federation does not run that module. [`sdk.federations()`](api-sdk-federations.md) lists the federations open right now.
+
+After a successful join, `await fed.balance()` returns `0n` and does not throw. That is the smallest proof that the federation is open, and it is where [Show a balance](balance.md) begins.
+
+## What you just did
+
+You read an invite code on the device, showed the user who is behind it and which network it is on, and joined. On every later launch, `federationOnLaunch` brings the same federation back, with no saved invite.
+
+Two things this page did not do. It did not leave a federation: `sdk.forgetFederation(id)` does that, and only for a federation with no money and no pending operation. And a wallet restored from seed words should not use `join` at all. It uses `recover`, which looks for money the seed already holds. [Restore from seed words](restore.md) shows it.
+
+---
+
+# Show a balance
+
+Read the balance once, then follow it as it changes.
+
+- Proven: first value is the balance now
+- Proven: useBalance ships in the package
+- Not yet: no retry after FederationClosed
+
+Every amount in this SDK is a `bigint` of millisatoshis. One sat is `1000n`. The core never rounds an amount for you, so a fee of half a sat is `500n`, not zero. The type is called `Amount`. No conversion helpers ship, so do the arithmetic inline: `msat / 1000n` gives whole sats.
+
+That choice costs you one rule, and [Amounts](amounts.md) ends with it: a `bigint` cannot go through `JSON.stringify`.
+
+### 01 · Read it once
+
+[`fed.balance()`](api-federation-balance.md) is the spendable balance of one federation, now. Use it where you need a number once, such as before a send.
+
+`read-balance.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+export async function balanceLine(fed: FederationLike): Promise<string> {
+  // A bigint, in millisatoshis: 1000n is one sat. A new wallet answers 0n.
+  const msat = await fed.balance()
+  return `${msat / 1000n} sats`
+}
+```
+
+On a federation you just joined, you will see `0 sats`.
+
+### 02 · Follow it
+
+A screen that shows a balance wants every change, not one reading. [`fed.balanceUpdates()`](api-federation-balanceupdates.md) returns a cursor. Its first `next()` returns the balance now. Each later `next()` waits for the next change. Pass an `AbortSignal` so that you can stop it. This is how code outside React follows a balance:
+
+`follow-balance.ts`
+
+```ts
+import type { Amount, FederationLike } from '@fedimint/react-native'
+
+/** Calls onChange with the balance now, then on every change. Returns a function that stops it. */
+export function followBalance(
+  fed: FederationLike,
+  onChange: (msat: Amount) => void,
+  onError: (err: unknown) => void,
+): () => void {
+  const controller = new AbortController()
+  const { signal } = controller
+  const updates = fed.balanceUpdates()
+
+  void (async () => {
+    try {
+      for (;;) {
+        // The first value is the balance now. Every later value is a change.
+        const msat = await updates.next({ signal })
+        if (signal.aborted) return
+        onChange(msat)
+      }
+    } catch (err) {
+      // A balance never ends cleanly. FederationClosed is how the stream stops.
+      if (!signal.aborted) onError(err)
+    }
+  })()
+
+  return () => controller.abort()
+}
+```
+
+In React, use `useBalance`. It does the same work, and it stops when the component unmounts:
+
+`BalanceLine.tsx`
+
+```tsx
+import React from 'react'
+import { Text } from 'react-native'
+import { useBalance, type FederationLike } from '@fedimint/react-native'
+
+export function BalanceLine({ fed }: { fed: FederationLike | undefined }) {
+  // undefined until the first value arrives, then the balance in msat, kept current.
+  const msat = useBalance(fed, (err) => console.log('balance watch', err))
+  return (
+    <Text>{msat === undefined ? 'loading...' : `${msat / 1000n} sats`}</Text>
+  )
+}
+```
+
+The `onError` callback hears about failures to watch, not failures of money. The usual one is `FederationClosed`, after the federation or the SDK closes. Neither `followBalance` nor `useBalance` starts again by itself. After you reopen the federation, start a new watch. For `useBalance`, remount the component with a new React `key`. [Share the session](session.md) shows how.
+
+Render `BalanceLine` and receive some ecash as in [Receive money](receive.md). You will see the line change from `0 sats` to the new balance with no code of yours in between.
+
+## What you just did
+
+You read a balance once, and followed it as it changes, both outside React and with `useBalance`. [See the history](history.md) uses the same `bigint` amounts for history rows.
+
+---
+
+# Receive money
+
+Redeem ecash, and create and watch a Lightning invoice.
+
+- Proven: ecash in
+- Proven: Lightning in
+- Proven: useOperation hook included
+- Not yet: on chain deposits not covered here
+
+Money arrives two ways. Ecash comes as a string somebody hands you, in a chat, a QR code or a file. Lightning comes as a payment to an invoice you create. Both give you back an operation: a handle on money that is on its way, which you can watch until it lands.
+
+Each rail is a method on the federation, [`fed.ecash()`](api-federation-ecash.md) and [`fed.lightning()`](api-federation-lightning.md). Either can return `undefined`, because a federation that does not run that module cannot offer it. The types make you check, so a missing module is a message on screen and not a crash.
+
+```text
+operation.updates()     a cursor. next() gives the state now, then each change, then undefined
+operation.awaitFinal()  resolves with the final state: success, failure or expiry alike
+operation.state()       the state now, once
+operation.id()          a string, to find it again in history (See the history)
+useOperation(op)        the same states in a React component. It stops when the component unmounts
+```
+
+### 01 · Ecash: find out what it is worth
+
+Before the user accepts a string, tell them what it is worth. `Notes.parse(str).value()` reads the value written inside the notes, in msat. It is instant and talks to no network.
+
+`inspect-notes.ts`
+
+```ts
+import { Notes, type FederationLike } from '@fedimint/react-native'
+
+/** What a pasted ecash string is worth, before the user commits to it. No network. */
+export function describeNotes(fed: FederationLike, pasted: string): string {
+  // Undefined when this federation does not run the ecash module. The compiler makes you check.
+  if (!fed.ecash()) return 'This federation does not take ecash.'
+
+  // Throws InvalidInput when the string is not ecash.
+  const msat = Notes.parse(pasted.trim()).value()
+  return `${msat / 1000n} sats`
+}
+```
+
+You will see the value of the notes in sats, before anything is redeemed.
+
+`value()` reads the notes. It cannot know whether they were already spent or taken back by the sender. Only the receive in step 02 finds that out.
+
+### 02 · Ecash: redeem it
+
+`ecash.receive(Notes.parse(str))` exchanges the notes with the federation for fresh ones that belong to this wallet. Only then is the money yours. Until that happens the sender can still take it back. So redeem as soon as the user says yes.
+
+`redeem-notes.ts`
+
+```ts
+import {
+  EcashReceiveState_Tags,
+  Notes,
+  type EcashReceiveState,
+  type FederationLike,
+} from '@fedimint/react-native'
+
+export async function redeem(
+  fed: FederationLike,
+  pasted: string,
+): Promise<EcashReceiveState> {
+  const ecash = fed.ecash()
+  if (!ecash) throw new Error('This federation does not take ecash.')
+
+  // Returns as soon as the redemption has started. The notes must come from this
+  // federation: notes from another one fail here with InvalidInput.
+  const operation = await ecash.receive(Notes.parse(pasted.trim()))
+
+  // Show progress while you wait. The first value is the state now.
+  const updates = operation.updates()
+  for (;;) {
+    const state = await updates.next()
+    if (state === undefined) break // the stream has ended
+    if (state.tag === EcashReceiveState_Tags.Issuing)
+      console.log('redeeming...')
+  }
+
+  // awaitFinal() resolves with the final state, good or bad. It does not throw for a failed receive.
+  const final = await operation.awaitFinal()
+  if (final.tag === EcashReceiveState_Tags.Failed) {
+    // Most often the sender took the notes back first.
+    console.log('receive failed:', final.inner.reason)
+  }
+  return final // Done means the value is in the balance and spendable.
+}
+```
+
+| State     | Means                                                   |
+| --------- | ------------------------------------------------------- |
+| `Created` | Accepted here, about to go to the federation            |
+| `Issuing` | The federation is issuing fresh notes                   |
+| `Done`    | Final. The value is in the balance and can be spent     |
+| `Failed`  | Final. Nothing arrived. `inner.reason` is for your logs |
+
+You will see the final state. After `Done`, the balance shows the new value.
+
+Any fee comes out of the notes, not on top. There is no quote on this side, because the receiver has nothing to decide.
+
+### 03 · Lightning: create an invoice
+
+`ln.receive(msat, description)` asks a Lightning gateway for an invoice and returns it with the operation that will see it paid. The amount is a msat `bigint`, so multiply what the user typed in sats by `1000n`. The description is required. The payer's wallet shows it.
+
+`create-invoice.ts`
+
+```ts
+import { Network, type FederationLike } from '@fedimint/react-native'
+
+/** Set this to true only in a build that is meant to hold real money. */
+const REAL_MONEY_BUILD = false
+
+export async function invoiceFor(fed: FederationLike, sats: number) {
+  const ln = fed.lightning()
+  if (!ln) throw new Error('This federation has no Lightning module.')
+
+  // A test build asks for test money only. Signet, like Fedi Testnet, is safe to play with.
+  if (fed.network() === Network.Bitcoin && !REAL_MONEY_BUILD) {
+    throw new Error(
+      'This federation is on Bitcoin mainnet. Refusing in a test build.',
+    )
+  }
+
+  // The amount is in msat. The description is required, and the payer sees it.
+  const { invoice, operation } = await ln.receive(
+    BigInt(sats) * 1000n,
+    'Coffee',
+  )
+  return { invoice, operation } // show invoice as text and as a QR code
+}
+```
+
+You will see an invoice string that starts with `lntbs` on signet.
+
+**Check the network before you ask for money.** While you build, use a signet federation such as Fedi Testnet and pay the invoice from a signet faucet. The check above stops a test build from asking anybody for real bitcoin because a mainnet invite slipped into a config file.
+
+### 04 · Lightning: watch the invoice
+
+The state is a tagged union. Switch on `state.tag`. The compiler knows every case, offers them as you type, and lets you read `state.inner` only on the cases that carry one. `Failed` here is not an expired invoice. It means a payment arrived and did not become money in the wallet, so show it as an error to report.
+
+Outside React, pull the [`updates()`](api-operation-updates.md) cursor. Pass an `AbortSignal`, and abort it when the screen closes, so nothing runs on a screen that has gone.
+
+`watch-invoice.ts`
+
+```ts
+import {
+  LnReceiveState_Tags,
+  type LnReceiveOperationLike,
+  type LnReceiveState,
+} from '@fedimint/react-native'
+
+/** What to show for each state. */
+export function describeInvoice(state: LnReceiveState): string {
+  switch (state.tag) {
+    case LnReceiveState_Tags.Created:
+    case LnReceiveState_Tags.WaitingForPayment:
+      return 'Waiting for payment'
+    case LnReceiveState_Tags.Funded:
+      return 'Paid. Claiming...'
+    case LnReceiveState_Tags.Claimed:
+      return 'Received' // in the balance now
+    case LnReceiveState_Tags.Expired:
+      return 'This invoice expired unpaid'
+    case LnReceiveState_Tags.Canceled:
+      console.log('invoice canceled:', state.inner.reason) // for your logs, not the screen
+      return 'The gateway withdrew this invoice. Make a new one'
+    case LnReceiveState_Tags.Failed:
+      return 'Something went wrong with this payment. Please report it'
+  }
+}
+
+/** Follows the invoice until it ends, or until signal is aborted. */
+export async function watchInvoice(
+  operation: LnReceiveOperationLike,
+  show: (text: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const updates = operation.updates()
+  try {
+    for (;;) {
+      // The first value is the state now. undefined means the stream has ended.
+      const state = await updates.next({ signal })
+      if (state === undefined) return
+      show(describeInvoice(state))
+    }
+  } catch (err) {
+    if (!signal.aborted) throw err // an abort is the screen closing, not an error
+  }
+}
+```
+
+In a React screen, `useOperation` does the same work. It starts on mount and stops on unmount. It returns `undefined` until the first state arrives, and keeps the final state after the stream ends.
+
+`InvoiceStatus.tsx`
+
+```ts
+import { Text } from 'react-native';
+import { useOperation, type LnReceiveOperationLike } from '@fedimint/react-native';
+import { describeInvoice } from './watch-invoice';
+
+export function InvoiceStatus({ operation }: { operation: LnReceiveOperationLike }) {
+  // A failure to watch goes to the second argument. It is never the payment's outcome.
+  const state = useOperation(operation, err => console.log('cannot watch the invoice:', err));
+  return <Text>{state === undefined ? 'Loading...' : describeInvoice(state)}</Text>;
+}
+```
+
+Pay the invoice from a signet faucet. You will see the state move to `Claimed`, and the balance line from [Show a balance](balance.md) changes by itself.
+
+## What you just did
+
+You priced a string of ecash before accepting it, redeemed it, created a Lightning invoice after checking the network, and followed both operations to a final state.
+
+This page does not cover on chain deposits. They live on [`fed.onchain()`](api-federation-onchain.md), which can return `undefined` like the other two rails.
+
+---
+
+# Send money
+
+Quote and send ecash, take it back, and pay a Lightning invoice.
+
+- Proven: quote, then send
+- Proven: ecash can be taken back
+- Not yet: the sender learns of a redemption only at reclaim
+- Not yet: a Lightning payment cannot be cancelled
+- Not yet: on chain sends not covered here
+
+Sending is where a wallet can lose somebody's money, so this page is more careful than the last one. Both rails work the same way, in two calls. First a **quote**: the SDK works out exactly what the send will cost and freezes it. You show those numbers and the user confirms. Then **send**, with that quote and nothing else. The user never agrees to one number and pays another.
+
+```text
+ecash      quote(msat)     -> show fee and total -> send(quote) -> { notes, operation }
+lightning  quote(invoice)  -> show fee and total -> send(quote) -> operation
+```
+
+Two more rules carry the rest. Ecash leaves the balance before anybody has received it. And a Lightning send that returns has started, not finished.
+
+### 01 · Ecash: quote it
+
+A federation issues notes in fixed sizes, so the notes for a request can be worth a little more than was asked. The quote shows both, and the fee, and the total the balance will move by. Every amount is a msat `bigint`.
+
+`quote-ecash.ts`
+
+```ts
+import type { EcashQuoteLike, FederationLike } from '@fedimint/react-native'
+
+/** Prices a send. Nothing leaves the balance yet. */
+export async function priceEcash(fed: FederationLike, sats: number) {
+  const ecash = fed.ecash()
+  if (!ecash) throw new Error('This federation does not take ecash.')
+  const quote: EcashQuoteLike = await ecash.quote(BigInt(sats) * 1000n)
+
+  // What the confirm screen shows. total() is what the balance moves by.
+  const lines = {
+    asked: `${quote.requestedAmount() / 1000n} sats`,
+    notesWorth: `${quote.notesValue() / 1000n} sats`, // can be a little more than asked
+    fee: `${quote.fee() / 1000n} sats`,
+    total: `${quote.total() / 1000n} sats`,
+  }
+  return { quote, lines }
+}
+```
+
+| On the quote                                          | Means                                                             |
+| ----------------------------------------------------- | ----------------------------------------------------------------- |
+| [`requestedAmount()`](api-ecash-requestedamount.md) | What you asked for                                                |
+| [`notesValue()`](api-ecash-notesvalue.md)           | What the receiver can redeem. Never less than asked               |
+| `fee()`                                               | The cost on top. Show it, even when it is zero                    |
+| `total()`                                             | What leaves the balance. Show this one before the user confirms   |
+| `expiresAt()`                                         | When the quote stops working, as a `bigint` of epoch milliseconds |
+
+You will see the four numbers in sats. The balance has not changed.
+
+A quote can fail with `NotSupported` when the wallet's notes cannot make up the amount. This SDK hands out only notes it already holds, and does not make change. Say so, and suggest a different amount. A quote can also fail with `InsufficientBalance`, even for an amount the balance would cover exactly, because the notes round up.
+
+### 02 · Ecash: hand over a string
+
+Sending takes the total out of the balance and gives you notes. [`notes.display()`](api-values-notes-display.md) turns them into the string to hand over. Whoever holds that string holds the money. There is no recipient, no address and no confirmation.
+
+`send-ecash.ts`
+
+```ts
+import {
+  ErrorCode,
+  Exception,
+  type EcashQuoteLike,
+  type FederationLike,
+} from '@fedimint/react-native'
+
+/** A QuoteExpired for a quote that was already sent. [Errors](./errors.md) explains it. */
+function alreadyExecuted(err: unknown): boolean {
+  const details = Exception.hasInner(err)
+    ? Exception.getInner(err).details()
+    : undefined
+  if (details?.kind !== 'QuoteExpired' || details.payload.byteLength < 9)
+    return false
+  return new DataView(details.payload).getUint8(8) === 1
+}
+
+/** After the user tapped Confirm on the quote. Returns the string to hand over. */
+export async function sendEcash(fed: FederationLike, quote: EcashQuoteLike) {
+  const ecash = fed.ecash()
+  if (!ecash) throw new Error('This federation does not take ecash.')
+  try {
+    // The balance drops when this returns, before anybody has redeemed anything.
+    const { notes, operation } = await ecash.send(quote)
+    return { text: notes.display(), operation }
+  } catch (err) {
+    const code = Exception.hasInner(err)
+      ? Exception.getInner(err).code()
+      : undefined
+    if (code === ErrorCode.QuoteChanged) {
+      // Nothing was spent. Quote again and ask the user to confirm the new numbers.
+      return null
+    }
+    if (code === ErrorCode.QuoteExpired && !alreadyExecuted(err)) {
+      // The quote ran out of time. Nothing was spent. Quote again, as above.
+      return null
+    }
+    // A quote that was already sent once. That send may have moved money. Check activity()
+    // and the balance before you quote again, or you may send twice.
+    throw err
+  }
+}
+```
+
+You will see a long string, and the balance drops by `total()`.
+
+**Treat the string as cash on screen.** It is bearer money in plain text. Anything that copies it, screenshots it, logs it or syncs it is moving the money itself.
+
+It is also often too long for one QR code. Give the user a copy button as well as a QR, and handle the QR library's failure rather than showing an empty square.
+
+A quote is for one send. After `expiresAt()` the send fails with `QuoteExpired`. If another send spent the notes it planned to use first, it fails with `QuoteChanged`. For both, nothing was spent: quote again and ask the user to confirm the new numbers. A quote that was already sent once also fails with `QuoteExpired`. That earlier send may have moved money, or it may have failed. Check [History](history.md) and the balance before you quote again, and follow the earlier send if it went through.
+
+### 03 · Ecash: take it back
+
+Until the receiver redeems the string, the sender can ask for the value back. [`operation.requestCancel()`](api-operation-requestcancel.md) records the request and returns. It does not wait for the network. The outcome arrives as a state, because the receiver may redeem first. `EcashSendState` is a plain enum, so compare it with `===`.
+
+`take-it-back.ts`
+
+```ts
+import {
+  EcashSendState,
+  type EcashSendOperationLike,
+} from '@fedimint/react-native'
+
+/** What to show for each state of a send. */
+export function describeSend(state: EcashSendState): string {
+  switch (state) {
+    case EcashSendState.Created:
+      return 'Sent. The receiver may have it already'
+    case EcashSendState.CancelRequested:
+      return 'Taking it back...'
+    case EcashSendState.Canceled:
+      return 'Back in your balance'
+    case EcashSendState.Redeemed:
+      return 'The receiver has it'
+  }
+}
+
+/** The user changed their mind. Only an ecash send can be taken back. */
+export async function takeItBack(
+  operation: EcashSendOperationLike,
+): Promise<string> {
+  // Returns once the request is recorded. It can still lose the race to a
+  // receiver who redeemed first.
+  await operation.requestCancel()
+  const final = await operation.awaitFinal()
+  return final === EcashSendState.Canceled
+    ? 'Back in your balance'
+    : 'The receiver redeemed it first'
+}
+```
+
+| State             | Means                                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Created`         | The string exists. The receiver may have redeemed it already. The sender cannot see that yet, so do not wait for `Redeemed` to tell the user the send worked |
+| `CancelRequested` | Taking it back. Not final: the receiver can still win                                                                                                        |
+| `Canceled`        | Final. The value is back in the balance                                                                                                                      |
+| `Redeemed`        | Final. The receiver has it                                                                                                                                   |
+
+You will see `Back in your balance`, or `The receiver redeemed it first` if the receiver was faster.
+
+**The sender learns the outcome only at reclaim.** A redemption sends nothing back to the sender. The SDK finds out only when it tries to take the notes back: after `requestCancel()`, or at the time in `details().reclaimAt`, when it takes unredeemed notes back by itself. On some federations that automatic reclaim runs only when your app reads the send again, so read its state after `reclaimAt`. [See the history](history.md) shows how to open a send again.
+
+Only an ecash send has `requestCancel()`. The other operation types do not have the method, so the compiler stops you before you try.
+
+### 04 · Lightning: quote the invoice
+
+`ln.quote(invoice)` reads the invoice, picks a gateway and works out the fee. Most of what can go wrong with a payment goes wrong here, before any money moves, which is the best place for it.
+
+`quote-invoice.ts`
+
+```ts
+import {
+  ErrorCode,
+  Exception,
+  type FederationLike,
+  type LnQuoteLike,
+} from '@fedimint/react-native'
+
+export async function priceInvoice(fed: FederationLike, pasted: string) {
+  const ln = fed.lightning()
+  if (!ln) throw new Error('This federation has no Lightning module.')
+  // Remove spaces and a "lightning:" prefix from what the user pasted or scanned.
+  const invoice = pasted.trim().replace(/^lightning:/i, '')
+  try {
+    const quote: LnQuoteLike = await ln.quote(invoice)
+    return {
+      quote,
+      pays: `${quote.invoiceAmount() / 1000n} sats`,
+      fee: `${quote.fee() / 1000n} sats`,
+      total: `${quote.total() / 1000n} sats`, // what the balance moves by
+    }
+  } catch (err) {
+    const code = Exception.hasInner(err)
+      ? Exception.getInner(err).code()
+      : undefined
+    if (code === ErrorCode.AmountlessInvoice)
+      return 'Ask for an invoice with an amount.'
+    if (code === ErrorCode.NetworkMismatch)
+      return 'That invoice is for a different network.'
+    if (code === ErrorCode.InsufficientBalance)
+      return 'Not enough in this wallet.'
+    if (code === ErrorCode.GatewayUnavailable)
+      return 'No Lightning gateway answered. Try later.'
+    throw err
+  }
+}
+```
+
+| Code                  | Means                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| `AmountlessInvoice`   | The invoice names no amount. This SDK cannot pay those                               |
+| `NetworkMismatch`     | The invoice is for another network, such as a mainnet invoice on a signet federation |
+| `InvalidInput`        | Not an invoice, or already expired                                                   |
+| `InsufficientBalance` | The balance cannot cover `total()`                                                   |
+| `GatewayUnavailable`  | No gateway could be reached and checked                                              |
+
+You will see the invoice amount, the fee and the total in sats, or one of the messages above.
+
+### 05 · Lightning: pay it, then wait for the answer
+
+`ln.send(quote)` returns an operation as soon as the payment has started. The payment is not made yet. The final state is the answer, and only `Success` means the invoice was paid. A failed payment is a state, not a thrown error.
+
+`pay-invoice.ts`
+
+```ts
+import {
+  LnSendState_Tags,
+  type FederationLike,
+  type LnQuoteLike,
+} from '@fedimint/react-native'
+
+export async function payInvoice(
+  fed: FederationLike,
+  quote: LnQuoteLike,
+): Promise<string> {
+  const ln = fed.lightning()
+  if (!ln) throw new Error('This federation has no Lightning module.')
+
+  // Returns when the payment has STARTED. Nothing is paid yet.
+  const operation = await ln.send(quote)
+
+  // The final state is the answer. awaitFinal() resolves for success, refund and failure alike.
+  const final = await operation.awaitFinal()
+  switch (final.tag) {
+    case LnSendState_Tags.Success:
+      // The preimage is the receipt: proof the invoice was paid.
+      return `Paid. Fee ${final.inner.fee / 1000n} sats. Proof ${final.inner.preimage}`
+    case LnSendState_Tags.Refunded:
+      return 'Not paid. The money is back in your balance.'
+    case LnSendState_Tags.Failed:
+      // The SDK cannot say where the money is. Log the reason, then read the balance.
+      console.log('payment failed:', final.inner.reason)
+      return 'Not paid. Check your balance before you try again.'
+    default:
+      return 'Still in progress' // awaitFinal() only resolves on a final state
+  }
+}
+```
+
+| Final state | Means                                                         | Tell the user                         |
+| ----------- | ------------------------------------------------------------- | ------------------------------------- |
+| `Success`   | Paid. `inner.preimage` proves it, `inner.fee` is what it cost | Paid                                  |
+| `Refunded`  | Not paid, and the money is spendable again                    | Not paid, nothing lost                |
+| `Failed`    | Not paid, and the SDK cannot say where the money is           | Check the balance before trying again |
+
+You will see `Paid` with the fee and the preimage, or one of the two other answers.
+
+**A Lightning payment cannot be cancelled.** Once sent it runs to one of those three endings. Do not offer a cancel button on this screen.
+
+## What you just did
+
+You quoted before every send, so the user saw the fee and the total before agreeing. You handed out ecash and took it back, and you paid an invoice and waited for the answer instead of trusting the return of a call.
+
+This page does not cover on chain sends. They live on [`fed.onchain()`](api-federation-onchain.md), which can return `undefined` like the other two rails.
+
+---
+
+# See the history
+
+Page through operations and turn each one into a row.
+
+- Proven: one list, both rails
+- Proven: pages, newest first
+- Proven: kept across restarts
+
+Every send and receive the wallet has made is kept in its data directory, across restarts. This page reads that record: as a list, one page at a time, and as a single operation you can open again and keep watching.
+
+### 01 · Read the newest page
+
+`fed.activity(cursor, limit)` returns a page of `ActivityItem` rows, newest first, for both rails in one list. Pass `undefined` as the cursor for the first page. `limit` is the most rows a page holds. It is required, and zero fails with `InvalidInput`.
+
+`first-page.ts`
+
+```ts
+import type { ActivityPage, FederationLike } from '@fedimint/react-native'
+
+/** The newest twenty operations, both rails, in one list. */
+export function firstPage(fed: FederationLike): Promise<ActivityPage> {
+  return fed.activity(undefined, 20)
+}
+```
+
+| Field           | Type                        | Means                                                              |
+| --------------- | --------------------------- | ------------------------------------------------------------------ |
+| `operationId`   | `string`                    | Opens the operation again, in step 04                              |
+| `kind`          | `OperationKind`             | `EcashSend`, `EcashReceive`, `LnSend`, `LnReceive` and others      |
+| `status`        | `ActivityStatus`            | How it turned out. Step 03                                         |
+| `isFinal`       | `boolean`                   | Whether it can still change                                        |
+| `amount`, `fee` | `bigint` msat, or undefined | The two numbers a list shows. `fee` is never folded into `amount`  |
+| `direction`     | `Direction`, or undefined   | `Incoming` or `Outgoing`                                           |
+| `time`          | `bigint`                    | Epoch milliseconds, from this device's clock, not the federation's |
+
+You will see up to twenty rows, with the newest first. A new wallet shows an empty `items` array.
+
+### 02 · Load the next page
+
+A page carries `next`, a cursor for the page after it, or `undefined` on the last page. Pass it back as the first argument when the user scrolls to the end of the list.
+
+`more-pages.ts`
+
+```ts
+import type {
+  ActivityItem,
+  Cursor,
+  FederationLike,
+} from '@fedimint/react-native'
+
+/** For a list that loads more as the user scrolls. */
+export async function loadMore(
+  fed: FederationLike,
+  after: Cursor | undefined,
+): Promise<{ items: ActivityItem[]; next: Cursor | undefined }> {
+  // undefined for the first page. The previous page's next after that.
+  const page = await fed.activity(after, 20)
+  return { items: page.items, next: page.next }
+}
+```
+
+`Cursor` is a plain string. You can keep it in state or in storage, and pass it back unchanged. Do not build one yourself: a cursor this federation did not issue fails with `InvalidInput`.
+
+You will see the older rows. When `next` is `undefined`, the list has ended.
+
+### 03 · Turn each row into your own, and know what pending means
+
+An `ActivityItem` holds `bigint` values, so the rule from [Show a balance](balance.md) applies: convert it at the edge into a row of your own before you keep it, cache it or send it anywhere.
+
+`to-row.ts`
+
+```ts
+import {
+  ActivityStatus,
+  Direction,
+  OperationKind,
+  type ActivityItem,
+} from '@fedimint/react-native'
+
+/** Your list row. Plain numbers and strings, so it can go through JSON and into storage. */
+export interface HistoryRow {
+  id: string
+  kind: string // "EcashSend", "LnReceive", ...
+  status: string // "Pending", "Success", "Refunded", ...
+  incoming: boolean | null // null when the row has no direction
+  sats: number | null // null when the row carries no amount
+  feeSats: number | null // null when the fee is not known yet
+  time: number // epoch milliseconds, from this device's clock
+  spinner: boolean // true while the operation can still change
+}
+
+export function toRow(item: ActivityItem): HistoryRow {
+  return {
+    id: item.operationId,
+    kind: OperationKind[item.kind],
+    status: ActivityStatus[item.status],
+    incoming:
+      item.direction === undefined
+        ? null
+        : item.direction === Direction.Incoming,
+    sats: item.amount === undefined ? null : Number(item.amount / 1000n),
+    feeSats: item.fee === undefined ? null : Number(item.fee / 1000n),
+    time: Number(item.time),
+    spinner: !item.isFinal,
+  }
+}
+```
+
+| Status     | Means                                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Pending`  | Still moving. The only status that can change                                                                                                     |
+| `Success`  | Completed as intended                                                                                                                             |
+| `Refunded` | Did not complete, and the value is spendable again                                                                                                |
+| `Canceled` | Called off or lapsed: ecash taken back, an invoice that expired unpaid. Nothing went wrong                                                        |
+| `Failed`   | Did not complete, and the value is not known to be back. Worth a look                                                                             |
+| `Unknown`  | A row this version of the SDK cannot read. It has no amount and no direction, so do not show it as money in or out. Use `isFinal` for the spinner |
+
+You will see one plain row for each item, with names such as `"LnReceive"` and `"Success"`.
+
+Decide whether to draw a spinner from `isFinal`, not from `status`. They agree on every row the SDK understands, and `isFinal` still answers correctly on a row it does not.
+
+### 04 · Open one operation again
+
+A list row is two numbers and a status. A receipt screen wants more. `fed.operation(id)` finds the operation again, even after a restart, and its [`kind()`](api-operation-kind.md) tells you which accessor to use: [`asEcashSend()`](api-operation-asecashsend.md), `asEcashReceive()`, `asLnSend()` or `asLnReceive()`. Each returns the same kind of operation as the screen that started it, so [`updates()`](api-operation-updates.md), [`awaitFinal()`](api-operation-awaitfinal.md), `useOperation` and, for an ecash send, `requestCancel()` all work.
+
+`open-one.ts`
+
+```ts
+import {
+  EcashSendState,
+  OperationKind,
+  type FederationLike,
+} from '@fedimint/react-native'
+
+/** A tap on a row: open that operation again and read what the SDK kept about it. */
+export async function reopenEcashSend(
+  fed: FederationLike,
+  operationId: string,
+) {
+  const any = await fed.operation(operationId)
+  if (!any) return null // not an operation of this federation
+  if (any.kind() !== OperationKind.EcashSend) return null
+
+  // Each accessor returns undefined unless the operation is of that kind.
+  const send = any.asEcashSend()
+  if (!send) return null
+
+  const state = await send.state()
+  const details = await send.details()
+
+  return {
+    redeemed: state === EcashSendState.Redeemed,
+    // Still the same bearer string. Show it again only to the person who sent it.
+    notes: details.notes.display(),
+    // After this time the wallet takes unredeemed notes back.
+    reclaimAt: new Date(Number(details.reclaimAt)),
+    // The same operation as on the send screen: updates, awaitFinal and requestCancel all work.
+    operation: send,
+  }
+}
+```
+
+[`details()`](api-operation-details.md) is what the SDK recorded about the operation. For an ecash send, that is the notes, the amounts, the fee and when unredeemed notes come back. For a Lightning send, it is the invoice, the route and the fee. Read it for a receipt rather than rebuilding one from list rows.
+
+You will see the send's notes and reclaim time again, for an operation made before the app restarted.
+
+## What you just did
+
+You listed both rails in one history, page by page, turned each row into a plain one your app can store, drew spinners from the one field that is always right, and opened an old operation again to read its receipt and keep watching it.
+
+---
+
+# Share the session
+
+Open the SDK once in a module your app owns, share the session, and follow it from any screen with hooks.
+
+- Proven: two hooks ship: useBalance and useOperation
+- Proven: React only for the hooks
+- Not yet: no provider ships, on purpose
+
+[Seed words](seed-words.md) said to open the SDK once and hand the same session to every screen. `@fedimint/react-native` does not ship a provider for this, on purpose. Your app decides when the wallet opens and when it closes. A provider that opens on mount and closes on unmount would take that choice away, and a remount could close the wallet under a screen that still uses it.
+
+| Piece                                                            | Who writes it | Does                                                                                              |
+| ---------------------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
+| `src/fedimint.ts`                                                | You           | Opens the SDK once, hands every caller the same `SdkSession`, and closes it when your app says so |
+| `SessionProvider`, [`useSession()`](api-session-usesession.md) | You, optional | A small React context that holds the session                                                      |
+| `useBalance(fed, onError?)`                                      | The SDK       | A federation's balance in msat, kept current. `undefined` until the first value                   |
+| `useOperation(op, onError?)`                                     | The SDK       | An operation's latest state, kept current. `undefined` until the first value                      |
+
+### 01 · Open once, in a module of your own
+
+Put the session in one module. `open()` calls `openSdk` the first time and gives every later caller the same session, even a caller that comes while the first open is still running. [`close()`](api-session-close.md) is the only place the session closes.
+
+`src/fedimint.ts`
+
+```ts
+import RNFS from 'react-native-fs'
+import { openSdk, type SdkSession } from '@fedimint/react-native'
+
+// A plain path, not a file:// URI. RNFS gives a plain path.
+const dataDir = `${RNFS.DocumentDirectoryPath}/fedimint`
+
+let session: SdkSession | undefined
+let opening: Promise<SdkSession> | undefined
+let closing: Promise<void> | undefined
+// close() adds one. An open that finishes in an older generation was closed while it ran.
+let generation = 0
+
+/** Opens the SDK once. Every caller gets the same session. */
+export function open(): Promise<SdkSession> {
+  const mine = generation
+  opening ??= (async () => {
+    // A close that is still running holds the folder. Wait for it, or the open fails with StorageInUse.
+    await closing?.catch(() => undefined)
+    return openSdk({ dataDir })
+  })().then(
+    (opened) => {
+      // If close() ran while this open was pending, close() closes this session. Do not publish it.
+      if (mine === generation) session = opened
+      return opened
+    },
+    (err) => {
+      if (mine === generation) opening = undefined // let the next call try again
+      throw err
+    },
+  )
+  return opening
+}
+
+/** Closes the session. Every federation and operation from it stops working. */
+export function close(): Promise<void> {
+  const pending = opening
+  generation += 1
+  session = undefined
+  opening = undefined
+  // An open that failed left nothing to close.
+  if (pending)
+    closing = pending.then(
+      (s) => s.close(),
+      () => undefined,
+    )
+  return closing ?? Promise.resolve()
+}
+
+/** The open session, or undefined before open() resolves and after close(). */
+export const current = (): SdkSession | undefined => session
+```
+
+Gate the tree on it once, near the top. The root opens the session and does not close it on unmount. An unmount is not the end of the wallet's life. Your app calls `close()` at the points it chooses, such as sign out or before a restore over the same folder.
+
+`src/WalletRoot.tsx`
+
+```tsx
+import React, { useEffect, useState } from 'react'
+import { Text } from 'react-native'
+import type { SdkSession } from '@fedimint/react-native'
+import { open } from './fedimint'
+
+/** Put this near the top of your tree, once. */
+export function WalletRoot({ children }: { children: React.ReactNode }) {
+  const [session, setSession] = useState<SdkSession | undefined>(undefined)
+  const [failed, setFailed] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    let live = true
+    open().then(
+      (opened) => {
+        if (live) setSession(opened)
+      },
+      (err) => {
+        if (live) setFailed(String(err))
+      },
+    )
+    // No close() here. The app closes the session, not a component.
+    return () => {
+      live = false
+    }
+  }, [])
+
+  if (failed) return <Text>Could not open the wallet: {failed}</Text>
+  if (!session) return <Text>Opening the wallet...</Text>
+  return <>{children}</>
+}
+```
+
+Below `WalletRoot`, any code can call `current()` and get the open session. Code outside React, such as a background task, calls `await open()` and gets the same one.
+
+**One module, one session.** Two calls to `openSdk` on the same folder do not share anything. The second fails with `StorageInUse`. Call `open()` from this module everywhere, and never call `openSdk` anywhere else.
+
+Wrap your navigator in `WalletRoot`. You will see `Opening the wallet...` for a moment, then your first screen.
+
+### 02 · Optional: hold the session in a context
+
+`current()` is enough for many apps. If you prefer to pass the session through React, write a small context. This is your code, not part of the SDK. It holds a session that is already open. It does not open one, and it does not close one.
+
+`src/SessionContext.tsx`
+
+```tsx
+import React, { createContext, useContext } from 'react'
+import type { SdkSession } from '@fedimint/react-native'
+
+const SessionContext = createContext<SdkSession | undefined>(undefined)
+
+/** Your own provider. It holds an open session and never closes it. */
+export function SessionProvider({
+  session,
+  children,
+}: {
+  session: SdkSession
+  children: React.ReactNode
+}) {
+  return (
+    <SessionContext.Provider value={session}>
+      {children}
+    </SessionContext.Provider>
+  )
+}
+
+/** The session from the nearest SessionProvider. Throws when there is none above. */
+export function useSession(): SdkSession {
+  const session = useContext(SessionContext)
+  if (!session) throw new Error('useSession needs a SessionProvider above it')
+  return session
+}
+```
+
+In `WalletRoot` from step 01, change the last line to `return <SessionProvider session={session}>{children}</SessionProvider>;` and import `SessionProvider` from `./SessionContext`. Then any screen below can call `useSession().sdk`.
+
+A screen below `WalletRoot` that renders `useSession().sdk.federations().length` shows `0` before the first join and `1` after it.
+
+### 03 · Follow a balance and an operation with hooks
+
+The SDK ships two hooks. `useBalance(fed, onError)` keeps a balance on screen. `useOperation(op, onError)` keeps an operation's state on screen: a receive, a send, or one reopened from history. Both accept `undefined`, so a screen can call them before its federation or operation is ready. That keeps the hooks in the same order on every render, which React requires.
+
+`InvoiceStatus.tsx`
+
+```tsx
+import React from 'react'
+import { Text } from 'react-native'
+import {
+  LnReceiveState_Tags,
+  useOperation,
+  type LnReceiveOperationLike,
+} from '@fedimint/react-native'
+
+/** Renders again on every state change, and stops listening when it unmounts. */
+export function InvoiceStatus({
+  operation,
+}: {
+  operation: LnReceiveOperationLike | undefined
+}) {
+  const state = useOperation(operation, (err) =>
+    console.log('operation watch', err),
+  )
+
+  if (!state) return <Text>Creating the invoice...</Text>
+  if (state.tag === LnReceiveState_Tags.Claimed) return <Text>Received</Text>
+  return <Text>{state.tag}</Text>
+}
+```
+
+Each hook is keyed on the object's `id()`. A new handle with the same id does not restart the watch. The hooks also never retry. When the federation or the session closes, the watch fails with `FederationClosed`, reports it to `onError`, and stops. After you reopen, remount the component with a new React `key`:
+
+`BalanceCard.tsx`
+
+```tsx
+import React, { useState } from 'react'
+import { Button, Text } from 'react-native'
+import {
+  ErrorCode,
+  Exception,
+  useBalance,
+  type FederationLike,
+} from '@fedimint/react-native'
+
+function BalanceLine({
+  fed,
+  onClosed,
+}: {
+  fed: FederationLike
+  onClosed: () => void
+}) {
+  const msat = useBalance(fed, (err) => {
+    if (
+      Exception.hasInner(err) &&
+      Exception.getInner(err).code() === ErrorCode.FederationClosed
+    ) {
+      onClosed()
+    } else {
+      console.log('balance watch', err)
+    }
+  })
+  return (
+    <Text>{msat === undefined ? 'loading...' : `${msat / 1000n} sats`}</Text>
+  )
+}
+
+type Props = {
+  fed: FederationLike
+  /** Your code: open the session again and get the federation back, as in Join a federation. */
+  reopen: () => Promise<FederationLike>
+}
+
+export function BalanceCard({ fed, reopen }: Props) {
+  const [current, setCurrent] = useState(fed)
+  const [watch, setWatch] = useState(0)
+  const [closed, setClosed] = useState(false)
+
+  if (closed) {
+    return (
+      <Button
+        title="Reconnect"
+        onPress={async () => {
+          setCurrent(await reopen())
+          setClosed(false)
+          // Same id, so only a new key starts a new watch.
+          setWatch((n) => n + 1)
+        }}
+      />
+    )
+  }
+  return (
+    <BalanceLine key={watch} fed={current} onClosed={() => setClosed(true)} />
+  )
+}
+```
+
+Create an invoice as in [Receive money](receive.md) and render `InvoiceStatus` with its operation. You will see `WaitingForPayment`, then `Received` once the invoice is paid, with no code of yours in between.
+
+## What you just did
+
+You opened the SDK once, in a module your app owns, and shared the session. You held it in an optional context of your own, and followed a balance and an operation with the SDK's hooks. The app owns the session's life: it opens it, and it closes it.
+
+[Restore from seed words](restore.md) covers the one time the SDK is opened differently: when the user brings their seed words to a new phone.
+
+---
+
+# Restore from seed words
+
+Open a wallet from seed words and recover each federation.
+
+- Proven: reports progress
+- Proven: resumes after a restart
+- Proven: refuses a different seed
+
+A user lost their phone, or bought a new one. They have the words from [Seed words](seed-words.md) written down. This page turns those words back into a wallet, then asks each federation they belonged to for the money that belongs to that seed.
+
+It takes two calls, and they do different jobs. `openSdk` with a `mnemonic` makes the words this wallet's seed. It talks to nobody. Then `sdk.recover(invite)`, once per federation, joins it and scans it for the seed's ecash. That scan can take minutes, so it comes back as an operation to watch.
+
+**The words do not say which federations the wallet used.** Recovery needs an invite for each one. Your app has to ask the user, or keep that list somewhere they can get back to, such as the directory from [Join a federation](join.md).
+
+### 01 · Take the words
+
+Let the user type or paste the words with any spacing and any capitals. A quick count catches a missing word early. The real check, the checksum, happens when the wallet opens in step 02.
+
+`read-words.ts`
+
+```ts
+/**
+ * Turns what the user typed into a list of words. The real check, the checksum,
+ * happens when the wallet opens: a wrong word fails there with InvalidInput.
+ */
+export function readWords(typed: string): string[] | null {
+  const words = typed.trim().toLowerCase().split(/\s+/)
+  return words.length === 12 || words.length === 24 ? words : null
+}
+```
+
+**The same care as [Seed words](seed-words.md) applies.** The text field holds the whole wallet. Turn off autocorrect and suggestions on it, never log it, and clear it when the screen closes.
+
+Paste 12 words with extra spaces and a capital letter. You will see `readWords` return 12 lowercase words. Paste 11 and you will see `null`.
+
+### 02 · Open the wallet with those words
+
+Pass the words as `mnemonic`. On a new phone the folder is empty, so the words become its seed. If the folder already holds the same seed, it opens as usual. If it holds a different one, the open refuses with `SeedMismatch` rather than mixing two wallets.
+
+`open-with-seed.ts`
+
+```ts
+import {
+  ErrorCode,
+  Exception,
+  openSdk,
+  type SdkSession,
+} from '@fedimint/react-native'
+
+/**
+ * dataDir is the same plain path the app always uses. On a new phone it is empty,
+ * so the words become this wallet's seed. Nothing is fetched: no federation is involved.
+ */
+export async function openRestored(
+  dataDir: string,
+  words: string[],
+): Promise<SdkSession> {
+  try {
+    return await openSdk({ dataDir, mnemonic: words })
+  } catch (err) {
+    if (!Exception.hasInner(err)) throw err
+    const code = Exception.getInner(err).code()
+    if (code === ErrorCode.InvalidInput) {
+      throw new Error(
+        'Those words are not a valid seed. Check each one and the order.',
+      )
+    }
+    if (code === ErrorCode.SeedMismatch) {
+      throw new Error('This phone already holds a different wallet.')
+    }
+    throw err
+  }
+}
+```
+
+Every later launch opens the folder without `mnemonic`, exactly as in [Seed words](seed-words.md).
+
+**Offer restore before the app opens the folder for the first time.** The first open of an empty folder creates a new seed, and after that the folder takes only that seed: other words fail with `SeedMismatch`. In the same run, an open also fails with `StorageInUse` while any federation, operation or subscription from the first session is still alive. A screen that unmounts does not free its objects at once, so [`close()`](api-session-close.md) alone is not enough.
+
+Open with the words, then call `session.sdk.exportMnemonic().words()`. You will see the same words, in the same order. Open with one word changed and you will see the `InvalidInput` message.
+
+### 03 · Recover each federation, and watch it
+
+Use `recover`, not `join`, for a federation the old wallet belonged to. A plain join starts fresh and does not look for money the seed already has there. `recover` returns as soon as the scan has started, with the joined `federation` and a `progress` operation to watch.
+
+`recover-federation.ts`
+
+```ts
+import {
+  InviteCode,
+  RecoveryState_Tags,
+  type RecoveryOperationLike,
+  type SdkLike,
+} from '@fedimint/react-native'
+
+/** Watches one recovery until it ends. Returns true when the wallet is restored. */
+export async function watchRecovery(
+  progress: RecoveryOperationLike,
+  show: (text: string) => void,
+): Promise<boolean> {
+  // The first value is the current state. undefined means the stream ended.
+  for (const updates = progress.updates(); ; ) {
+    const state = await updates.next()
+    if (state === undefined) {
+      return (await progress.awaitFinal()).tag === RecoveryState_Tags.Done
+    }
+    switch (state.tag) {
+      case RecoveryState_Tags.Running: {
+        const p = state.inner.progress // undefined until the scan knows its size
+        show(
+          p
+            ? `Looking for your money: ${p.complete} of ${p.total}`
+            : 'Looking for your money...',
+        )
+        break
+      }
+      case RecoveryState_Tags.Done:
+        show('Your money is back.')
+        return true
+      case RecoveryState_Tags.Failed:
+        // For you, not for the user: reason is free text.
+        console.log('recovery stopped:', state.inner.reason)
+        show('Recovery stopped before it finished.')
+        return false
+    }
+  }
+}
+
+/** Call once per federation the user belonged to. Use recover, not join, for these. */
+export async function recoverFederation(
+  sdk: SdkLike,
+  invite: string,
+  show: (text: string) => void,
+): Promise<boolean> {
+  // The wallet keeps the federation in its folder. federationOnLaunch finds it there.
+  const { progress } = await sdk.recover(InviteCode.parse(invite.trim()))
+  return watchRecovery(progress, show)
+}
+```
+
+| State     | Means                                                                                                                                                                                                                 | Money can move                                                       |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `Running` | Scanning the federation's history for this seed, then taking in what it found. `inner.progress` is `{ complete, total }`, or `undefined` until the scan knows its size. `complete` reaching `total` is not `Done` yet | No. Sends and receives fail with `Recovering`                        |
+| `Done`    | Final. The wallet is restored in this federation, and the balance includes what the scan found                                                                                                                        | Yes                                                                  |
+| `Failed`  | Final for this attempt. The scan stopped before it finished. `inner.reason` is for your logs                                                                                                                          | No. The federation stays locked until a later attempt reaches `Done` |
+
+A screen can show the same thing with `useOperation(progress)` from [Share the session](session.md).
+
+**Call `recover` once per federation.** A second call for the same federation fails with `AlreadyJoined`. To watch the scan again, or to retry one that ended in `Failed`, use `sdk.resumeRecovery(id)` in step 04.
+
+A `recover` that throws `FederationUnreachable`, `Timeout` or `Storage` may already have joined. Do not treat it as "nothing happened". Read the id with `InviteCode.parse(invite).federationId()` and go to step 04.
+
+Recover Fedi Testnet with the words of a wallet that held money there. You will see `Looking for your money` with a count that grows, then `Your money is back.` From `Done` on, the balance line shows the restored amount.
+
+### 04 · Pick a recovery up again after a restart
+
+The scan keeps its place in the wallet folder. When the app opens the folder again, the SDK reopens each federation and carries on with its scan. If the last attempt ended in `Failed`, the reopen starts a new attempt by itself. What the app has lost is its handle to watch. `sdk.resumeRecovery(id)` gives it back, and needs no invite code.
+
+`resume-recoveries.ts`
+
+```ts
+import {
+  RecoveryState_Tags,
+  type RecoveryHandle,
+  type SdkLike,
+} from '@fedimint/react-native'
+
+/**
+ * At launch: a handle for each recovery that has not reached Done yet.
+ * Pass each handle's progress to watchRecovery from step 03.
+ */
+export async function resumeRecoveries(
+  sdk: SdkLike,
+): Promise<RecoveryHandle[]> {
+  const handles: RecoveryHandle[] = []
+  for (const fed of sdk.federations()) {
+    // undefined: this federation was joined, not recovered, so it was never locked.
+    const state = await sdk.recoveryStatus(fed.id())
+    if (state === undefined || state.tag === RecoveryState_Tags.Done) continue
+    // Running: watches the attempt in progress. Failed: starts a new attempt.
+    handles.push(await sdk.resumeRecovery(fed.id()))
+  }
+  return handles
+}
+```
+
+`recoveryStatus` only reads. It starts nothing and contacts no guardian. Use it to hide the send and receive buttons while a federation is locked, rather than wait for a call to fail with `Recovering`.
+
+Start a recovery, stop the app during the scan, and start it again. You will see `resumeRecoveries` return one handle, and `watchRecovery` go on from `Running` to `Done`.
+
+## What you just did
+
+You took the user's seed words, opened a wallet with them, asked each federation for the money that belongs to that seed, watched the scan until it finished, and picked it up again after a restart.
+
+That is every guide. What this guide does not cover: on chain deposits and withdrawals through [`fed.onchain()`](api-federation-onchain.md), and leaving a federation.
+
+---
+
+# Errors
+
+Read a failure by its code, and look up what each code means.
+
+- Proven: 23 stable codes
+- Not yet: not instanceof
+
+Every failure the SDK reports carries an `Exception`. Branch on its `code()`, log its `reason()`, and never show or match on `reason()`.
+
+### 01 · Read a failure by its code
+
+The SDK does not throw an `Exception` object itself. It throws a wrapper, so `err instanceof Exception` is `false`. Ask `Exception.hasInner(err)` first. If it is `true`, `Exception.getInner(err)` gives you the `Exception`, with three methods. Each has a different job.
+
+| Method      | What it is                                                                                                    | What to do with it                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `code()`    | An `ErrorCode` value, such as `ErrorCode.Timeout`. `ErrorCode[code]` is its name as text, such as `"Timeout"` | Branch on it. It is stable                                           |
+| `reason()`  | The SDK's own sentence about what went wrong                                                                  | Log it. Never show it, and never match on it: its wording can change |
+| `details()` | `undefined`, or `{ version, kind, payload }`. `kind` names the detail, such as `"StorageInUse"`               | Log `kind`. Do not show it                                           |
+
+The SDK ships no helper for this. Put these small functions in your app, and use them everywhere you catch an error.
+
+`errors.ts`
+
+```ts
+// errors.ts: your code. The SDK ships no helper for this.
+import { ErrorCode, Exception } from '@fedimint/react-native'
+
+/** The SDK's code for a failure, or undefined for an error that did not come from the SDK. */
+export function errorCode(err: unknown): ErrorCode | undefined {
+  return Exception.hasInner(err) ? Exception.getInner(err).code() : undefined
+}
+
+/** One line for your logs. Never show it to the user. */
+export function explain(err: unknown): string {
+  if (!Exception.hasInner(err)) return String(err)
+  const e = Exception.getInner(err)
+  const kind = e.details()?.kind
+  return `${ErrorCode[e.code()]}: ${e.reason()}${kind ? ` (${kind})` : ''}`
+}
+
+/**
+ * True when a QuoteExpired failure means the quote was already sent once. That earlier send
+ * may have moved money, or it may have failed. The detail payload is the expiry as 8 bytes,
+ * then this flag as 1 byte.
+ */
+export function quoteAlreadyExecuted(err: unknown): boolean {
+  if (!Exception.hasInner(err)) return false
+  const details = Exception.getInner(err).details()
+  if (details?.kind !== 'QuoteExpired' || details.payload.byteLength < 9)
+    return false
+  return new DataView(details.payload).getUint8(8) === 1
+}
+```
+
+Then branch on the code where you catch:
+
+`explain-failure.ts`
+
+```ts
+import { ErrorCode, InviteCode, type SdkLike } from '@fedimint/react-native'
+import { errorCode, explain } from './errors'
+
+export async function previewOrExplain(
+  sdk: SdkLike,
+  invite: string,
+): Promise<string> {
+  try {
+    const preview = await sdk.preview(InviteCode.parse(invite.trim()))
+    return preview.name ?? 'a federation that does not publish a name'
+  } catch (err) {
+    const code = errorCode(err)
+    // No code means the error did not come from the SDK. Let it crash loudly.
+    if (code === undefined) throw err
+
+    // For you, not for the user: reason is free text and its wording can change.
+    console.log(`preview failed: ${explain(err)}`)
+
+    // For the user: branch on code, which is stable.
+    switch (code) {
+      case ErrorCode.InvalidInput:
+        return 'That is not an invite code.'
+      case ErrorCode.FederationUnreachable:
+      case ErrorCode.Timeout:
+        return 'Could not reach that federation. Check your connection and try again.'
+      case ErrorCode.UnsupportedFederation:
+        return 'This wallet cannot use that federation.'
+      default:
+        return 'Something went wrong.'
+    }
+  }
+}
+```
+
+The codes you will meet first, and where:
+
+| Code                               | Means                                                                                  | Usually from                                                                                                                                                        |
+| ---------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InvalidInput`                     | A string that is not what it claims: invite, notes, invoice or seed words              | The [join](join.md), [receive](receive.md), [send](send.md) and [restore](restore.md) guides                                                                |
+| `FederationUnreachable`, `Timeout` | No guardian answered, or not in time                                                   | Any call that talks to a federation                                                                                                                                 |
+| `AlreadyJoined`                    | This wallet has joined that federation before                                          | [The join guide](join.md). Use `sdk.federation(id)` or `sdk.reopenFederation(id)`                                                                                 |
+| `InsufficientBalance`              | Not enough to cover the total                                                          | [The send guide](send.md)                                                                                                                                         |
+| `QuoteChanged`                     | The quote cannot be used any more. Nothing was spent                                   | [The send guide](send.md). Quote again                                                                                                                            |
+| `QuoteExpired`                     | The quote ran out of time, or it was already sent once. That send may have moved money | [The send guide](send.md). If `quoteAlreadyExecuted(err)`, check `activity()` and the balance first, and quote again only if nothing moved. Otherwise quote again |
+| `Recovering`                       | A restore has not reached `Done`, so money cannot move yet                             | [The restore guide](restore.md)                                                                                                                                   |
+| `StorageInUse`                     | The wallet folder is already open                                                      | Step 01 of [the seed words page](seed-words.md)                                                                                                                   |
+| `SeedMismatch`                     | The folder holds a different seed from the words you passed                            | [The restore guide](restore.md)                                                                                                                                   |
+| `FederationClosed`                 | The federation or the whole SDK was closed                                             | Any call after `session.close()`                                                                                                                                    |
+
+The SDK keeps its own time limits. A preview or a join whose guardians do not answer in time rejects with `Timeout` or `FederationUnreachable`, so you do not need a timer of your own around those two calls.
+
+Call `previewOrExplain(sdk, 'hello')`. You will see `That is not an invite code.`, and a log line that starts with `preview failed: InvalidInput:`.
+
+## Codes
+
+Every member of `ErrorCode`, with the meaning the SDK gives it. Compare with `===`: it is a plain enum.
+
+| Code                                                                 | Means                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InvalidInput`                   | The input could not be parsed or was structurally invalid: a malformed invite code, invoice, ecash notes, address, mnemonic or activity cursor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `AlreadyJoined`                 | The federation identified by an invite code has already been joined.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `UnsupportedFederation` | The federation cannot be used as configured. This includes mixed module generations within one federation (all modules must share the same v1 or v2 generation), and configurations the SDK otherwise refuses to operate on.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `FederationUnreachable` | No guardian could be reached to service the request.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `InsufficientBalance`     | The spendable balance is too low to cover the requested amount.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `BalanceNotEmpty`             | A request to permanently forget a federation was made while spendable balance still remains in it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `PendingOperations`         | A request to permanently forget a federation was made while non-final operations or reclaimable outgoing value still exist for it. An incomplete recovery is deliberately not one of those reasons, so this code is never returned on that account.                                                                                                                                                                                                                                                                                                                                                                             |
+| `GatewayUnavailable`       | No usable lightning gateway is currently available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `Recovering`                       | The requested action is unavailable because this federation's recovery is incomplete. Incomplete is not the same as still running: a recovery that stopped short leaves the lock in place, and only a recovery that runs to completion releases it.                                                                                                                                                                                                                                                                                                                                                                             |
+| `NotSupported`                   | The federation does not have the module backing this facade. This occurs when a facade obtained earlier is used after the federation's configuration changed to drop that module.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `UnsupportedOperation`   | A persisted operation exists but this build cannot interpret it: the record names a kind this build does not know, or a state schema newer than it reads. The operation is still observable but not actionable.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `SeedMismatch`                   | Storage already holds a seed and it does not match the mnemonic supplied to open it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `StorageInUse`                   | The storage location is already open, in this process or another.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `StorageOrphaned`             | Storage holds federation or client state but no usable seed, so it cannot be opened. The seed entry is either absent, or present and unusable. This is permanent, not transient: asking again does not change it, and the refusal changes nothing in the store. Do not retry and do not repair it automatically. Report it and offer the ways out, in this order: update the SDK or the app where the entry was present but unusable; point at a different location; or, as a last resort a person chooses explicitly, abandon the location by deleting its contents, which destroys any funds whose only backup was that seed. |
+| `QuoteExpired`                   | The quote passed to `send` is no longer valid: either its validity window has passed, or it has already been executed, and a quote funds exactly one payment. The two need different handling. If the window passed, nothing was spent: obtain a fresh quote and retry. If the quote was already sent once (`quoteAlreadyExecuted(err)` in step 01), that earlier send may have moved money, or it may have failed. Check `activity()` and the balance before you quote again. If the earlier send went through, follow it: an ecash or on-chain send quoted again moves the money twice.                                       |
+| `QuoteChanged`                   | Conditions material to the quote (fees, routing, federation state) changed since it was issued. Obtain a fresh quote and retry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `AmountlessInvoice`         | The bolt11 invoice specifies no amount, and such an invoice cannot be paid. No amount the caller supplies can make it payable, because Fedimint does not support paying amountless bolt11 invoices at all. The only remedy is a different invoice, one that names its own amount.                                                                                                                                                                                                                                                                                                                                               |
+| `NetworkMismatch`             | A supplied address or invoice is for a different network than the federation's.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `FederationClosed`           | The federation handle is closed, either because it was individually closed while retaining its data, or because the whole SDK instance was shut down.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `Timeout`                             | The operation did not complete within an internal time budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `Entropy`                             | The platform's secure random source was unavailable or failed, so no entropy could be drawn. This is the one failure a caller can do nothing about: there is no input to correct, no permission to grant, and no retry that reliably helps. Report it and stop, and do not substitute entropy of your own.                                                                                                                                                                                                                                                                                                                      |
+| `Storage`                             | The local storage backend failed to read or write. This is a fault in the backend itself (the I/O failed, or the device is out of space), so it is potentially transient, and retrying once the underlying condition is gone is reasonable. It does not cover a store whose contents are wrong: that is `StorageOrphaned`, `SeedMismatch` or `StorageInUse`.                                                                                                                                                                                                                                                                    |
+| `Internal`                           | An internal error that does not fit any other category. Its presence generally indicates a bug.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+---
+
+# Amounts
+
+Change units in three places of your own, and store amounts as plain numbers.
+
+- Proven: bigint msat
+- Not yet: no helpers ship
+
+Every amount in this SDK is a `bigint` of millisatoshis. One sat is `1000n`. The SDK never rounds an amount for you: a fee of half a sat is `500n`, not zero. The type is called `Amount`, and every name that holds one should say its unit, `msat` or `sats`.
+
+### 01 · Change units in exactly three places
+
+Users think in sats. The SDK takes and returns msat. The arithmetic is short: `BigInt(sats) * 1000n` turns sats into msat, and `msat / 1000n` turns msat into whole sats, rounded down. The SDK ships no helpers for this, so write three of your own and change units only there.
+
+`amounts.ts`
+
+```ts
+// amounts.ts: your code. The SDK ships no amount helpers.
+import type { Amount } from '@fedimint/react-native'
+
+/** Whole sats to msat. Throws RangeError on a fraction: half a sat is 500n msat, so say so. */
+export function satsToMsat(sats: number | bigint): Amount {
+  return BigInt(sats) * 1000n // BigInt(12.5) throws RangeError
+}
+
+/** msat to whole sats, rounded down, as a number for a chart or your own storage. */
+export function msatToSats(msat: Amount): number {
+  return Number(msat / 1000n) // every real amount of bitcoin fits a safe integer of sats
+}
+
+/** Exact sats as text, for the screen: 1250500n is "1250.5". */
+export function formatSats(msat: Amount): string {
+  const fraction = (msat % 1000n).toString().padStart(3, '0').replace(/0+$/, '')
+  return fraction ? `${msat / 1000n}.${fraction}` : `${msat / 1000n}`
+}
+```
+
+| Your helper        | From, to                                     | Fractions                         |
+| ------------------ | -------------------------------------------- | --------------------------------- |
+| `satsToMsat(sats)` | whole sats, as `number` or `bigint`, to msat | Throws `RangeError` on a fraction |
+| `formatSats(msat)` | msat to text, for the screen                 | Exact: `"1250.5"`                 |
+| `msatToSats(msat)` | msat to a whole `number` of sats             | Rounds down                       |
+
+`use-amounts.ts`
+
+```ts
+import { formatSats, msatToSats, satsToMsat } from './amounts'
+
+// Sats the user typed, into the msat every call takes.
+export const msat = satsToMsat(1250) // 1250000n
+
+// Exact, for the screen. A fraction of a sat is shown, not hidden.
+export const shown = formatSats(1250500n) // "1250.5"
+
+// Whole sats as a number, rounded DOWN, for a chart or your own storage.
+export const whole = msatToSats(1250999n) // 1250
+```
+
+Use `formatSats` for anything a user reads, so that the screen and the wallet agree to the millisat. Use `msatToSats` only where a whole number is what you want and losing a fraction of a sat is fine.
+
+Log `shown` and `whole`. You will see `1250.5` and `1250`. Call `satsToMsat(12.5)` and you will see a `RangeError`.
+
+### 02 · Convert at the edge before you store anything
+
+`JSON.stringify` throws on a `bigint`. So does anything built on it: AsyncStorage, MMKV with JSON values, a Redux persist layer, a network request body. The rule is simple. Never store an SDK object. At the edge of your app, turn it into a row of your own with plain `number` and `string` fields, and store that.
+
+`save-balance.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+/** Your own row: plain numbers and strings, so JSON.stringify can write it. */
+export interface SavedBalance {
+  federationId: string
+  sats: number
+  savedAt: number
+}
+
+export async function balanceToSave(fed: FederationLike): Promise<string> {
+  const msat = await fed.balance()
+
+  // JSON.stringify({ msat }) throws "TypeError: Do not know how to serialize a BigInt".
+  // Convert at the edge instead, and store your own shape, never the SDK's.
+  const row: SavedBalance = {
+    federationId: fed.id(),
+    sats: Number(msat / 1000n),
+    savedAt: Date.now(),
+  }
+  return JSON.stringify(row)
+}
+```
+
+**A saved balance is a picture, not the balance.** Show it while the real one loads, then replace it with what `useBalance` reports. Never decide whether a send is affordable from a stored number.
+
+Call `balanceToSave` on a federation you just joined. You will see a string such as `{"federationId":"…","sats":0,"savedAt":…}`. [The receive guide](receive.md) puts money in, and the next save shows the new number.
+
+## Types
+
+The SDK exports three number types from its package root. Each one is a `bigint`, and each has one unit.
+
+| Type        | Unit                         | Where you meet it                                                                  |
+| ----------- | ---------------------------- | ---------------------------------------------------------------------------------- |
+| `Amount`    | Millisatoshis                | Every ecash and lightning amount, fee and total, and every balance.                |
+| `Sats`      | Whole sats                   | On chain amounts, from `fed.onchain()`. Bitcoin on chain has no smaller unit.      |
+| `Timestamp` | Milliseconds since 1970, UTC | Times in history rows and operation details. `new Date(Number(t))` makes a `Date`. |
+
+## What you just did
+
+You moved between msat and sats in the only three places a unit changes, and turned an amount into a row your app can store. [The history guide](history.md) uses the same rule for history rows.
+
+---
+
+# Seed words
+
+Open the wallet once, and show the seed words only to their owner.
+
+- Proven: no federation needed
+- Proven: synchronous export
+- Proven: 12 words on a new wallet
+
+The [installation guide](installation.md) opened the wallet and counted its seed words. This page opens that call up. You will not add a feature here. You will learn two habits every later guide relies on: open the wallet once, and treat the seed words as the money. The third habit, reading a failure by its code, is on [the errors page](errors.md).
+
+Everything hangs off one object. `openSdk` gives you a session. Its `sdk` is the wallet: one seed, and any number of federations joined with it. Each federation you join is a `FederationLike`, and money moves through its `ecash()` and `lightning()` methods. Amounts are always `bigint` millisatoshis.
+
+```text
+openSdk({ dataDir })                    one session, one seed
+  sdk.exportMnemonic().words()          the words, for a backup screen
+  sdk.preview(invite)                   what a federation is, before joining (Join a federation)
+  sdk.join(invite)                      a federation (Join a federation)
+  sdk.recover(invite)                   a federation, restored from a seed (Restore from seed words)
+    fed.balance()                       bigint msat (Show a balance)
+    fed.ecash()?.receive(notes)         an operation (Receive money)
+    fed.lightning()?.quote(invoice)     then send(quote) (Send money)
+    fed.activity(undefined, 50)         history (See the history)
+  session.close()                       when the app is done
+```
+
+### 01 · Open the wallet once
+
+A wallet folder can be open once at a time. The SDK holds the folder, and a second `openSdk` on it, from the same app or another one, fails at once with `StorageInUse`. So open it in one place, keep the promise, and hand the same session to every screen.
+
+`dataDir` is a plain path, not a `file://` URI. With react-native-fs it is `` `${RNFS.DocumentDirectoryPath}/fedimint` ``. If your file library returns a `file://` URI, strip that prefix first.
+
+`open-wallet.ts`
+
+```ts
+import { openSdk, type SdkSession } from '@fedimint/react-native'
+
+let opening: Promise<SdkSession> | undefined
+let closing: Promise<void> | undefined
+// closeWallet() adds one. An open that fails in an older generation was closed while it ran.
+let generation = 0
+
+/**
+ * The one wallet for the whole app. Every caller gets the same promise, so the
+ * folder is opened once. A second open of the same folder fails with StorageInUse.
+ * dataDir is a plain path, such as `${RNFS.DocumentDirectoryPath}/fedimint`.
+ */
+export function openWallet(dataDir: string): Promise<SdkSession> {
+  const mine = generation
+  opening ??= (async () => {
+    // A close that is still running holds the folder. Wait for it, or the open fails with StorageInUse.
+    await closing?.catch(() => undefined)
+    return openSdk({ dataDir })
+  })().catch((err: unknown) => {
+    if (mine === generation) opening = undefined // let the next caller try again
+    throw err
+  })
+  return opening
+}
+
+/** When the app is finished with the wallet. Every object it handed out stops working. */
+export function closeWallet(): Promise<void> {
+  const pending = opening
+  generation += 1
+  opening = undefined
+  // An open that failed left nothing to close.
+  if (pending)
+    closing = pending.then(
+      (s) => s.close(),
+      () => undefined,
+    )
+  return closing ?? Promise.resolve()
+}
+```
+
+In a React app [Share the session](session.md) shows how to share the session with every screen. The rule stays the same: your app opens the wallet, and your app closes it.
+
+**A JavaScript reload can leave the old wallet open.** When Metro reloads your code, the session from the old JavaScript can still hold the folder. If the new code then gets `StorageInUse`, stop the app and start it again. A user never sees this: a release build does not reload.
+
+**To open a folder again, let go of everything from the first session.** [`close()`](api-session-close.md) shuts the SDK down and destroys `sdk`. The folder comes free only when nothing else from that session is alive either: no federation, no operation, no subscription. An open before that fails with `StorageInUse`. It does not wait.
+
+Call `openWallet(dataDir)` from two screens. You will see both get the same session, and no `StorageInUse`.
+
+### 02 · Show the seed words to their owner, and nobody else
+
+[`sdk.exportMnemonic()`](api-sdk-exportmnemonic.md) returns the seed at once, with no `await`, because the SDK holds it in memory. The result does not print itself. [`words()`](api-values-mnemonic-words.md) is the separate step that gives you the words as strings. They are the whole wallet: anyone who reads them can restore it on another phone and spend everything in it.
+
+`backup-words.ts`
+
+```ts
+import type { SdkSession } from '@fedimint/react-native'
+
+/**
+ * Call this only from a backup screen that the user opened on purpose.
+ *
+ * Anyone who reads these words can take every sat in the wallet. Do not log them,
+ * do not send them to analytics or a crash reporter, and do not store them yourself:
+ * the wallet already keeps the seed in its own folder.
+ */
+export function wordsForBackupScreen(session: SdkSession): string[] {
+  return session.sdk.exportMnemonic().words()
+}
+```
+
+Read the words before you call `close()`. After it, `sdk` is destroyed and every call on it throws, `exportMnemonic` too.
+
+**Never log the words, and never put them in an error message.** A crash reporter, an analytics event or a debug overlay that includes them has copied the money to somebody else's server. Show them on a screen the user opened on purpose, and let the user write them down. A screenshot copies them too, often to a cloud photo backup. On Android, set `FLAG_SECURE` on the window while the words show. iOS cannot block a screenshot, so tell the user to write the words, not to capture the screen. [The restore guide](restore.md) is where they come back.
+
+Open the backup screen on a new wallet. You will see 12 words. Open it again and you will see the same 12 words in the same order.
+
+## What you just did
+
+You opened the wallet once for the whole app and kept the seed words where only their owner will see them. [The errors page](errors.md) shows how to turn the SDK's failures into messages a user can act on, and every later guide reuses all three habits.
+
+[The join guide](join.md) makes the first call that leaves the device.
+
+---
+
+# API
+
+Every method the guides use: signature, parameters, return value and errors.
+
+This section has one page for each method that the guides call. Each page shows the signature, the parameters, the return value, the error codes it can throw, an example, and the guide steps that use it.
+
+Many calls in the bindings take a last optional parameter, `asyncOpts_`, for an abort signal. The signatures on this page leave it out.
+
+`useSession` is not part of the package. It is guide code from [the Session page](session.md#step-02).
+
+## Session
+
+Open the SDK, close it, and follow it with hooks.
+
+| Method                                          | Signature                                                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| [`openSdk`](api-session-opensdk.md)           | `openSdk(options: OpenOptions): Promise<SdkSession>`                                                                |
+| [`SdkSession.close`](api-session-close.md)    | `close(): Promise<void>`                                                                                            |
+| [`useSession`](api-session-usesession.md)     | `useSession(): SdkSession`                                                                                          |
+| [`useBalance`](api-session-usebalance.md)     | `useBalance(federation: FederationLike \| undefined, onError?: (err: unknown) => void): Amount \| undefined`        |
+| [`useOperation`](api-session-useoperation.md) | `useOperation<S>(operation: ObservableOperation<S> \| undefined, onError?: (err: unknown) => void): S \| undefined` |
+
+## Sdk
+
+Methods of SdkLike, the type of `session.sdk`.
+
+| Method                                                        | Signature                                                               |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [`SdkLike.preview`](api-sdk-preview.md)                     | `preview(invite: InviteCodeLike): Promise<FederationPreview>`           |
+| [`SdkLike.join`](api-sdk-join.md)                           | `join(invite: InviteCodeLike): Promise<FederationLike>`                 |
+| [`SdkLike.recover`](api-sdk-recover.md)                     | `recover(invite: InviteCodeLike): Promise<RecoveryHandle>`              |
+| [`SdkLike.resumeRecovery`](api-sdk-resumerecovery.md)       | `resumeRecovery(id: FederationId): Promise<RecoveryHandle>`             |
+| [`SdkLike.recoveryStatus`](api-sdk-recoverystatus.md)       | `recoveryStatus(id: FederationId): Promise<RecoveryState \| undefined>` |
+| [`SdkLike.federation`](api-sdk-federation.md)               | `federation(id: FederationId): FederationLike \| undefined`             |
+| [`SdkLike.federations`](api-sdk-federations.md)             | `federations(): Array<FederationLike>`                                  |
+| [`SdkLike.storedFederations`](api-sdk-storedfederations.md) | `storedFederations(): Array<FederationInfo>`                            |
+| [`SdkLike.reopenFederation`](api-sdk-reopenfederation.md)   | `reopenFederation(id: FederationId): Promise<FederationLike>`           |
+| [`SdkLike.exportMnemonic`](api-sdk-exportmnemonic.md)       | `exportMnemonic(): MnemonicLike`                                        |
+
+## Federation
+
+Methods of FederationLike, the handle you get from `join`, `federation` and reopenFederation.
+
+| Method                                                                | Signature                                                                     |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [`FederationLike.id`](api-federation-id.md)                         | `id(): FederationId`                                                          |
+| [`FederationLike.name`](api-federation-name.md)                     | `name(): string \| undefined`                                                 |
+| [`FederationLike.network`](api-federation-network.md)               | `network(): Network`                                                          |
+| [`FederationLike.balance`](api-federation-balance.md)               | `balance(): Promise<Amount>`                                                  |
+| [`FederationLike.balanceUpdates`](api-federation-balanceupdates.md) | `balanceUpdates(): BalanceUpdatesLike`                                        |
+| [`FederationLike.activity`](api-federation-activity.md)             | `activity(cursor: Cursor \| undefined, limit: number): Promise<ActivityPage>` |
+| [`FederationLike.operation`](api-federation-operation.md)           | `operation(id: OperationId): Promise<AnyOperationLike \| undefined>`          |
+| [`FederationLike.ecash`](api-federation-ecash.md)                   | `ecash(): EcashLike \| undefined`                                             |
+| [`FederationLike.lightning`](api-federation-lightning.md)           | `lightning(): LightningLike \| undefined`                                     |
+| [`FederationLike.capabilities`](api-federation-capabilities.md)     | `capabilities(): Capabilities`                                                |
+| [`FederationLike.inviteCode`](api-federation-invitecode.md)         | `inviteCode(): InviteCodeLike`                                                |
+| [`FederationLike.meta`](api-federation-meta.md)                     | `meta(): MetaLike`                                                            |
+| [`FederationLike.onchain`](api-federation-onchain.md)               | `onchain(): OnchainLike \| undefined`                                         |
+
+## Ecash
+
+Methods of EcashLike, from `federation.ecash()`, and of the quote it returns.
+
+| Method                                                             | Signature                                                       |
+| ------------------------------------------------------------------ | --------------------------------------------------------------- |
+| [`EcashLike.quote`](api-ecash-quote.md)                          | `quote(amount: Amount): Promise<EcashQuoteLike>`                |
+| [`EcashLike.send`](api-ecash-send.md)                            | `send(quote: EcashQuoteLike): Promise<EcashSendHandle>`         |
+| [`EcashLike.receive`](api-ecash-receive.md)                      | `receive(notes: NotesLike): Promise<EcashReceiveOperationLike>` |
+| [`EcashQuoteLike.requestedAmount`](api-ecash-requestedamount.md) | `requestedAmount(): Amount`                                     |
+| [`EcashQuoteLike.notesValue`](api-ecash-notesvalue.md)           | `notesValue(): Amount`                                          |
+| [`EcashQuoteLike.fee`](api-ecash-fee.md)                         | `fee(): Amount`                                                 |
+| [`EcashQuoteLike.total`](api-ecash-total.md)                     | `total(): Amount`                                               |
+
+## Lightning
+
+Methods of LightningLike, from `federation.lightning()`, and of the quote it returns.
+
+| Method                                                          | Signature                                                                |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [`LightningLike.quote`](api-lightning-quote.md)               | `quote(invoice: Bolt11Invoice): Promise<LnQuoteLike>`                    |
+| [`LightningLike.send`](api-lightning-send.md)                 | `send(quote: LnQuoteLike): Promise<LnSendOperationLike>`                 |
+| [`LightningLike.receive`](api-lightning-receive.md)           | `receive(amount: Amount, description: string): Promise<LnReceiveHandle>` |
+| [`LnQuoteLike.invoiceAmount`](api-lightning-invoiceamount.md) | `invoiceAmount(): Amount`                                                |
+| [`LnQuoteLike.fee`](api-lightning-fee.md)                     | `fee(): Amount`                                                          |
+| [`LnQuoteLike.total`](api-lightning-total.md)                 | `total(): Amount`                                                        |
+
+## Operation
+
+The handles EcashSendOperationLike, EcashReceiveOperationLike, LnReceiveOperationLike, LnSendOperationLike and RecoveryOperationLike share the same state methods. AnyOperationLike is the untyped handle. The signatures below use EcashSendOperationLike. Each other handle uses its own state type in place of EcashSendState.
+
+| Method                                                                     | Signature                                            |
+| -------------------------------------------------------------------------- | ---------------------------------------------------- |
+| [`EcashSendOperationLike.state`](api-operation-state.md)                 | `state(): Promise<EcashSendState>`                   |
+| [`EcashSendOperationLike.updates`](api-operation-updates.md)             | `updates(): EcashSendOperationUpdatesLike`           |
+| [`EcashSendOperationLike.awaitFinal`](api-operation-awaitfinal.md)       | `awaitFinal(): Promise<EcashSendState>`              |
+| [`EcashSendOperationLike.requestCancel`](api-operation-requestcancel.md) | `requestCancel(): Promise<void>`                     |
+| [`AnyOperationLike.asEcashSend`](api-operation-asecashsend.md)           | `asEcashSend(): EcashSendOperationLike \| undefined` |
+| [`AnyOperationLike.kind`](api-operation-kind.md)                         | `kind(): OperationKind`                              |
+| [`EcashSendOperationLike.details`](api-operation-details.md)             | `details(): Promise<EcashSendDetails>`               |
+
+## Values
+
+Parse strings into checked values, and read seed `words`.
+
+| Method                                                                   | Signature                                        |
+| ------------------------------------------------------------------------ | ------------------------------------------------ |
+| [`InviteCode.parse`](api-values-invitecode-parse.md)                   | `InviteCode.parse(code: string): InviteCodeLike` |
+| [`InviteCodeLike.federationId`](api-values-invitecode-federationid.md) | `federationId(): FederationId`                   |
+| [`Notes.parse`](api-values-notes-parse.md)                             | `Notes.parse(notes: string): NotesLike`          |
+| [`NotesLike.value`](api-values-notes-value.md)                         | `value(): Amount`                                |
+| [`NotesLike.display`](api-values-notes-display.md)                     | `display(): string`                              |
+| [`MnemonicLike.words`](api-values-mnemonic-words.md)                   | `words(): Array<string>`                         |
+
+## Errors (Exception)
+
+Read the `Exception` that the SDK throws. Each `code` of `ErrorCode` is described in the table on the Errors page.
+
+| Method                                             | Signature                                                              |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| [`Exception.hasInner`](api-errors-hasinner.md)   | `Exception.hasInner(obj_: any): obj_ is UniffiThrownObject<Exception>` |
+| [`Exception.getInner`](api-errors-getinner.md)   | `Exception.getInner(err: UniffiThrownObject<Exception>): Exception`    |
+| [`ExceptionLike.code`](api-errors-code.md)       | `code(): ErrorCode`                                                    |
+| [`ExceptionLike.reason`](api-errors-reason.md)   | `reason(): string`                                                     |
+| [`ExceptionLike.details`](api-errors-details.md) | `details(): RawErrorDetails \| undefined`                              |
+
+---
+
+# openSdk
+
+```ts
+openSdk(options: OpenOptions): Promise<SdkSession>
+```
+
+Opens the SDK on a data directory and gives you a session.
+
+**Parameters**
+
+| Name               | Type       | Description                                                                                                         |
+| ------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| `options.dataDir`  | `string`   | The directory where the SDK keeps its data.                                                                         |
+| `options.mnemonic` | `string[]` | Optional. Seed `words` to establish. Omit it to use the stored seed, or to make a new seed over an empty directory. |
+
+**Returns.** `SdkSession`. An open session. It holds `sdk`, `InviteCode.parse`, `Notes.parse`, `Mnemonic.fromWords`, `Mnemonic.generate` and `close()`.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`StorageInUse`](errors.md#code-storageinuse), [`SeedMismatch`](errors.md#code-seedmismatch), [`Entropy`](errors.md#code-entropy), [`Storage`](errors.md#code-storage), [`StorageOrphaned`](errors.md#code-storageorphaned). InvalidInput means bad seed words. This call does not return UnsupportedFederation or FederationUnreachable.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { openSdk } from '@fedimint/react-native'
+
+declare const dataDir: string
+
+const session = await openSdk({ dataDir })
+console.log(session.sdk.federations().length)
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Installation, step 06](installation.md#step-06), [Session, step 01](session.md#step-01), [Seed words, step 01](seed-words.md#step-01), [Restore, step 02](restore.md#step-02)
+
+---
+
+# SdkSession.close
+
+```ts
+close(): Promise<void>
+```
+
+Shuts down the SDK and destroys it.
+
+**Parameters.** None.
+
+**Returns.** `Promise<void>`. Resolves after `sdk.shutdown()` and `sdk.uniffiDestroy()` finish. A later call shares the same teardown.
+
+**Throws.** [`Storage`](errors.md#code-storage). Storage means the final flush failed. The SDK is still destroyed. After close, a call on sdk throws a bindings error that is not an Exception. A data directory that stays held gives StorageInUse on the next open.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { SdkSession } from '@fedimint/react-native'
+
+declare const session: SdkSession
+
+await session.close()
+```
+
+**Used in.** [Seed words, step 01](seed-words.md#step-01), [Session, step 01](session.md#step-01), [Installation, step 06](installation.md#step-06)
+
+---
+
+# useSession
+
+```ts
+useSession(): SdkSession
+```
+
+Gives the session from the nearest `SessionProvider`. This is guide code from the Session page. The package does not export it.
+
+**Parameters.** None.
+
+**Returns.** `SdkSession`. The session from the nearest `SessionProvider`.
+
+**Throws.** A plain Error when no SessionProvider is above the hook. It carries no ErrorCode.
+
+**Example**
+
+`example.tsx`
+
+```tsx
+import type { SdkSession } from '@fedimint/react-native'
+
+declare function useSession(): SdkSession // from the Session page
+
+const session = useSession()
+console.log(session.sdk.federations().length)
+```
+
+**Used in.** [Session, step 02](session.md#step-02)
+
+---
+
+# useBalance
+
+```ts
+useBalance(federation: FederationLike | undefined, onError?: (err: unknown) => void): Amount | undefined
+```
+
+A React hook that follows the balance of a `federation`.
+
+**Parameters**
+
+| Name         | Type                          | Description                                   |
+| ------------ | ----------------------------- | --------------------------------------------- |
+| `federation` | `FederationLike \| undefined` | The `federation` to watch.                    |
+| `onError`    | `(err: unknown) => void`      | Optional. Receives the failure of the stream. |
+
+**Returns.** `Amount | undefined`. The live balance in msat (a bigint). It is `undefined` until the first value arrives, and after a failure.
+
+**Throws.** The hook does not throw. It reports a failure to onError, with FederationClosed once the federation or the SDK is closed. It does not retry.
+
+**Example**
+
+`example.tsx`
+
+```tsx
+import { useBalance, type FederationLike } from '@fedimint/react-native'
+
+export function useBalanceSats(fed: FederationLike | undefined) {
+  const msat = useBalance(fed, (err) => console.log('balance watch', err))
+  return msat === undefined ? undefined : msat / 1000n
+}
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Balance, step 02](balance.md#step-02), [Session, step 03](session.md#step-03)
+
+---
+
+# useOperation
+
+```ts
+useOperation<S>(operation: ObservableOperation<S> | undefined, onError?: (err: unknown) => void): S | undefined
+```
+
+A React hook that follows the state of an operation.
+
+**Parameters**
+
+| Name        | Type                                  | Description                              |
+| ----------- | ------------------------------------- | ---------------------------------------- |
+| `operation` | `ObservableOperation<S> \| undefined` | Any generated operation handle.          |
+| `onError`   | `(err: unknown) => void`              | Optional. Receives a failure to observe. |
+
+**Returns.** `S | undefined`. The latest state of the operation. The final state stays after the stream ends.
+
+**Throws.** The hook does not throw. A failure goes to onError and is never the outcome of the operation. The updates stream can report Storage, FederationClosed or Internal.
+
+**Example**
+
+`example.tsx`
+
+```tsx
+import {
+  useOperation,
+  type LnReceiveOperationLike,
+} from '@fedimint/react-native'
+
+export function useInvoiceState(op: LnReceiveOperationLike | undefined) {
+  return useOperation(op, (err) => console.log('operation watch', err))
+}
+```
+
+**Used in.** [Receive, step 04](receive.md#step-04), [Session, step 03](session.md#step-03)
+
+---
+
+# SdkLike.preview
+
+```ts
+preview(invite: InviteCodeLike): Promise<FederationPreview>
+```
+
+Looks up a `federation` from its invite `code`. It joins nothing and stores nothing.
+
+**Parameters**
+
+| Name     | Type             | Description                   |
+| -------- | ---------------- | ----------------------------- |
+| `invite` | `InviteCodeLike` | The invite `code` to look up. |
+
+**Returns.** `FederationPreview`. The name (optional), network, number of guardians, module names and metadata of the `federation`.
+
+**Throws.** [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`UnsupportedFederation`](errors.md#code-unsupportedfederation), [`FederationClosed`](errors.md#code-federationclosed).
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { InviteCodeLike, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const invite: InviteCodeLike
+
+const preview = await sdk.preview(invite)
+console.log(preview.name ?? 'unnamed federation')
+```
+
+**Used in.** [Join, step 02](join.md#step-02), [Errors, step 01](errors.md#step-01)
+
+---
+
+# SdkLike.join
+
+```ts
+join(invite: InviteCodeLike): Promise<FederationLike>
+```
+
+Joins a `federation`.
+
+**Parameters**
+
+| Name     | Type             | Description                                      |
+| -------- | ---------------- | ------------------------------------------------ |
+| `invite` | `InviteCodeLike` | The invite `code` of the `federation` to `join`. |
+
+**Returns.** `FederationLike`. A handle to the joined `federation`. The `federation` is saved and running.
+
+**Throws.** [`AlreadyJoined`](errors.md#code-alreadyjoined), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`UnsupportedFederation`](errors.md#code-unsupportedfederation), [`FederationClosed`](errors.md#code-federationclosed), [`Storage`](errors.md#code-storage). It also returns every error of preview.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { InviteCodeLike, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const invite: InviteCodeLike
+
+const fed = await sdk.join(invite)
+console.log(fed.id())
+```
+
+**Used in.** [Join, step 03](join.md#step-03), [Quickstart, step 02](quickstart.md#step-02)
+
+---
+
+# SdkLike.recover
+
+```ts
+recover(invite: InviteCodeLike): Promise<RecoveryHandle>
+```
+
+Joins a `federation` again and restores its funds from the seed.
+
+**Parameters**
+
+| Name     | Type             | Description                                                     |
+| -------- | ---------------- | --------------------------------------------------------------- |
+| `invite` | `InviteCodeLike` | The invite `code` of the `federation` to restore from the seed. |
+
+**Returns.** `RecoveryHandle`. An object with the `federation` handle and an operation that reports the progress of the recovery.
+
+**Throws.** [`AlreadyJoined`](errors.md#code-alreadyjoined), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`UnsupportedFederation`](errors.md#code-unsupportedfederation), [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed). Each code has the caveat that the wallet may already have joined.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { InviteCodeLike, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const invite: InviteCodeLike
+
+const { progress } = await sdk.recover(invite)
+console.log((await progress.awaitFinal()).tag)
+```
+
+**Used in.** [Restore, step 03](restore.md#step-03)
+
+---
+
+# SdkLike.resumeRecovery
+
+```ts
+resumeRecovery(id: FederationId): Promise<RecoveryHandle>
+```
+
+Continues the recovery of a `federation`.
+
+**Parameters**
+
+| Name | Type           | Description                                                          |
+| ---- | -------------- | -------------------------------------------------------------------- |
+| `id` | `FederationId` | The `federation` whose recovery continues. FederationId is a string. |
+
+**Returns.** `RecoveryHandle`. A handle to the `federation` and its recovery operation.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`FederationClosed`](errors.md#code-federationclosed), [`Storage`](errors.md#code-storage). InvalidInput means the wallet joined this federation with join, so no recovery record exists. FederationClosed means the id names no open federation, or the SDK is shut down. Not verified: more codes can exist past these three.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationId, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const id: FederationId
+
+const { progress } = await sdk.resumeRecovery(id)
+console.log((await progress.awaitFinal()).tag)
+```
+
+**Used in.** [Restore, step 04](restore.md#step-04)
+
+---
+
+# SdkLike.recoveryStatus
+
+```ts
+recoveryStatus(id: FederationId): Promise<RecoveryState | undefined>
+```
+
+Reads the recovery state of a `federation`.
+
+**Parameters**
+
+| Name | Type           | Description                    |
+| ---- | -------------- | ------------------------------ |
+| `id` | `FederationId` | The `federation` to ask about. |
+
+**Returns.** `RecoveryState | undefined`. The recovery state. It is `undefined` when the `federation` has no recovery.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed). FederationClosed means the id names no open federation, or the SDK is shut down.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationId, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const id: FederationId
+
+const state = await sdk.recoveryStatus(id)
+console.log(state?.tag)
+```
+
+**Used in.** [Restore, step 04](restore.md#step-04)
+
+---
+
+# SdkLike.federation
+
+```ts
+federation(id: FederationId): FederationLike | undefined
+```
+
+Looks up an open `federation` by its id. Synchronous.
+
+**Parameters**
+
+| Name | Type           | Description                  |
+| ---- | -------------- | ---------------------------- |
+| `id` | `FederationId` | The `federation` to look up. |
+
+**Returns.** `FederationLike | undefined`. The open `federation` handle, or `undefined` when none is open.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput). InvalidInput means the id is a malformed string.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationId, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const id: FederationId
+
+const fed = sdk.federation(id)
+console.log(fed?.name())
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Join, step 03](join.md#step-03), [Errors, step 01](errors.md#step-01)
+
+---
+
+# SdkLike.federations
+
+```ts
+federations(): Array<FederationLike>
+```
+
+Lists the open federations. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Array<FederationLike>`. Every open `federation`. The order is not specified.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+
+for (const fed of sdk.federations()) {
+
+  console.log(fed.id())
+}
+```
+
+**Used in.** [Restore, step 04](restore.md#step-04), [Join, step 03](join.md#step-03), [Session, step 02](session.md#step-02)
+
+---
+
+# SdkLike.storedFederations
+
+```ts
+storedFederations(): Array<FederationInfo>
+```
+
+Lists every `federation` in storage, running or not. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Array<FederationInfo>`. One record for each stored `federation`, with its status.
+
+**Throws.** None. The method is infallible. It still answers after shutdown.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+
+const [stored] = sdk.storedFederations()
+console.log(stored?.id)
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Join, step 03](join.md#step-03)
+
+---
+
+# SdkLike.reopenFederation
+
+```ts
+reopenFederation(id: FederationId): Promise<FederationLike>
+```
+
+Starts a stored `federation` again, without an invite `code`.
+
+**Parameters**
+
+| Name | Type           | Description                             |
+| ---- | -------------- | --------------------------------------- |
+| `id` | `FederationId` | The stored `federation` to start again. |
+
+**Returns.** `FederationLike`. The live handle. Old handles stay closed.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`UnsupportedFederation`](errors.md#code-unsupportedfederation), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means no such federation exists, or it is in the Forgetting state.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationId, SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+declare const id: FederationId
+
+const fed = await sdk.reopenFederation(id)
+console.log(fed.name())
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Join, step 03](join.md#step-03), [Errors, step 01](errors.md#step-01)
+
+---
+
+# SdkLike.exportMnemonic
+
+```ts
+exportMnemonic(): MnemonicLike
+```
+
+Gives the seed phrase object of the wallet. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `MnemonicLike`. The seed phrase object. Call `words()` on it to read the `words`.
+
+**Throws.** None. The method is infallible. After SdkSession.close() the object is destroyed, so export first.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { SdkLike } from '@fedimint/react-native'
+
+declare const sdk: SdkLike
+
+const mnemonic = sdk.exportMnemonic()
+console.log(mnemonic.words().length)
+```
+
+**Used in.** [Seed words, step 02](seed-words.md#step-02), [Restore, step 02](restore.md#step-02), [Installation, step 06](installation.md#step-06)
+
+---
+
+# FederationLike.id
+
+```ts
+id(): FederationId
+```
+
+Gives the id of this `federation`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `FederationId`. The id of the `federation`, as a string.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const id = fed.id()
+console.log(id)
+```
+
+**Used in.** [Amounts, step 02](amounts.md#step-02), [Restore, step 04](restore.md#step-04)
+
+---
+
+# FederationLike.name
+
+```ts
+name(): string | undefined
+```
+
+Gives the name from the configuration of the `federation`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `string | undefined`. The name from the configuration. It is not unique and it is not verified.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const name = fed.name()
+console.log(name ?? 'unnamed federation')
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02)
+
+---
+
+# FederationLike.network
+
+```ts
+network(): Network
+```
+
+Gives the Bitcoin network of the `federation`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Network`. The Bitcoin network the `federation` runs on.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { Network, type FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const network = fed.network()
+console.log(network === Network.Bitcoin ? 'real money' : 'test money')
+```
+
+**Used in.** [Receive, step 03](receive.md#step-03)
+
+---
+
+# FederationLike.balance
+
+```ts
+balance(): Promise<Amount>
+```
+
+Reads the balance of the `federation` once.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The notes the wallet holds as its own, in msat (a bigint). Money inside an operation that is still running is not counted. During a recovery the value is partial, and none of it is spendable.
+
+**Throws.** [`Internal`](errors.md#code-internal), [`FederationClosed`](errors.md#code-federationclosed).
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const msat = await fed.balance()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Balance, step 01](balance.md#step-01), [Amounts, step 02](amounts.md#step-02)
+
+---
+
+# FederationLike.balanceUpdates
+
+```ts
+balanceUpdates(): BalanceUpdatesLike
+```
+
+Opens a new cursor on the balance. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `BalanceUpdatesLike`. A new cursor. Call `next()` for each value. The first `next()` gives the current value.
+
+**Throws.** This call cannot fail. The first next() gives FederationClosed on a closed federation. Later next() calls can also give Storage or Internal.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const updates = fed.balanceUpdates()
+const msat = await updates.next()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Balance, step 02](balance.md#step-02)
+
+---
+
+# FederationLike.activity
+
+```ts
+activity(cursor: Cursor | undefined, limit: number): Promise<ActivityPage>
+```
+
+Reads one page of the local history.
+
+**Parameters**
+
+| Name     | Type                  | Description                                                                                                    |
+| -------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `cursor` | `Cursor \| undefined` | Use `undefined` for the first page. After that, use the `next` value of the previous page. Cursor is a string. |
+| `limit`  | `number`              | The maximum number of items.                                                                                   |
+
+**Returns.** `ActivityPage`. One page of items, newest first, with an optional `next` cursor. A page with fewer items than `limit` is normal. An empty page with no `next` cursor is the end.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`InvalidInput`](errors.md#code-invalidinput), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means a cursor from another source, or a limit of 0.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const page = await fed.activity(undefined, 20)
+console.log(page.items.length, page.next)
+```
+
+**Used in.** [History, step 01](history.md#step-01), [History, step 02](history.md#step-02)
+
+---
+
+# FederationLike.operation
+
+```ts
+operation(id: OperationId): Promise<AnyOperationLike | undefined>
+```
+
+Looks up one operation by its id.
+
+**Parameters**
+
+| Name | Type          | Description                                        |
+| ---- | ------------- | -------------------------------------------------- |
+| `id` | `OperationId` | The operation to look up. OperationId is a string. |
+
+**Returns.** `AnyOperationLike | undefined`. The operation, or `undefined` when the log has no operation with that id.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed).
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike, OperationId } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+declare const operationId: OperationId
+
+const operation = await fed.operation(operationId)
+console.log(operation?.kind())
+```
+
+**Used in.** [History, step 04](history.md#step-04)
+
+---
+
+# FederationLike.ecash
+
+```ts
+ecash(): EcashLike | undefined
+```
+
+Gives the ecash facade. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `EcashLike | undefined`. The facade, or `undefined` when the `federation` has no ecash module.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const ecash = fed.ecash()
+if (!ecash) throw new Error('This federation does not take ecash.')
+```
+
+**Used in.** [Send, step 01](send.md#step-01), [Send, step 02](send.md#step-02), [Receive, step 01](receive.md#step-01), [Receive, step 02](receive.md#step-02)
+
+---
+
+# FederationLike.lightning
+
+```ts
+lightning(): LightningLike | undefined
+```
+
+Gives the Lightning facade. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `LightningLike | undefined`. The facade, or `undefined` when the `federation` has no Lightning module.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const ln = fed.lightning()
+if (!ln) throw new Error('This federation has no Lightning module.')
+```
+
+**Used in.** [Receive, step 03](receive.md#step-03), [Send, step 04](send.md#step-04), [Send, step 05](send.md#step-05)
+
+---
+
+# FederationLike.capabilities
+
+```ts
+capabilities(): Capabilities
+```
+
+Tells what the `federation` can do. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Capabilities`. An object of booleans, such as ecash, for what the `federation` can do.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const caps = fed.capabilities()
+console.log(caps.ecash, caps.lightning, caps.onchain)
+```
+
+**Used in.** [Join, step 03](join.md#step-03)
+
+---
+
+# FederationLike.inviteCode
+
+```ts
+inviteCode(): InviteCodeLike
+```
+
+Gives an invite `code` that you can share. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `InviteCodeLike`. An invite `code` for this `federation`.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const invite = fed.inviteCode()
+console.log(invite.federationId())
+```
+
+**Used in.** [Join, step 03](join.md#step-03)
+
+---
+
+# FederationLike.meta
+
+```ts
+meta(): MetaLike
+```
+
+Gives the metadata of the `federation`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `MetaLike`. The metadata object of the `federation`.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const meta = fed.meta()
+console.log(meta.configMetadata().get('welcome_message'))
+```
+
+**Used in.** Not used in a guide step.
+
+---
+
+# FederationLike.onchain
+
+```ts
+onchain(): OnchainLike | undefined
+```
+
+Gives the on-chain facade. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `OnchainLike | undefined`. The facade, or `undefined` when the `federation` has no on-chain module.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { FederationLike } from '@fedimint/react-native'
+
+declare const fed: FederationLike
+
+const onchain = fed.onchain()
+console.log(onchain === undefined ? 'no on-chain module' : 'on-chain module')
+```
+
+**Used in.** [Join, step 03](join.md#step-03)
+
+---
+
+# EcashLike.quote
+
+```ts
+quote(amount: Amount): Promise<EcashQuoteLike>
+```
+
+Plans a send of ecash. Nothing is debited.
+
+**Parameters**
+
+| Name     | Type     | Description                                                                                                    |
+| -------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `amount` | `Amount` | The least value the receiver must be able to redeem, in msat (a bigint). The real value is the same or higher. |
+
+**Returns.** `EcashQuoteLike`. A frozen plan. Nothing is debited yet.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`InsufficientBalance`](errors.md#code-insufficientbalance), [`NotSupported`](errors.md#code-notsupported), [`Recovering`](errors.md#code-recovering), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means a zero amount.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashLike } from '@fedimint/react-native'
+
+declare const ecash: EcashLike
+
+const quote = await ecash.quote(5000n) // 5 sats, in msat
+console.log(quote.total())
+```
+
+**Used in.** [Send, step 01](send.md#step-01)
+
+---
+
+# EcashLike.send
+
+```ts
+send(quote: EcashQuoteLike): Promise<EcashSendHandle>
+```
+
+Runs a quote and makes the notes to hand over.
+
+**Parameters**
+
+| Name    | Type             | Description                                                                |
+| ------- | ---------------- | -------------------------------------------------------------------------- |
+| `quote` | `EcashQuoteLike` | The quote to run. A quote that was already sent fails with `QuoteExpired`. |
+
+**Returns.** `EcashSendHandle`. An object with the notes to hand over and the operation to follow. The balance drops when this call returns.
+
+**Throws.** [`QuoteExpired`](errors.md#code-quoteexpired), [`QuoteChanged`](errors.md#code-quotechanged), [`InsufficientBalance`](errors.md#code-insufficientbalance), [`Recovering`](errors.md#code-recovering), [`NotSupported`](errors.md#code-notsupported), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed).
+
+The string is bearer money. Whoever has it can redeem it. Show it only to the recipient, and never log it, store it in plain text or send it to analytics.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashLike, EcashQuoteLike } from '@fedimint/react-native'
+
+declare const ecash: EcashLike
+declare const quote: EcashQuoteLike
+declare function showToRecipient(text: string): void
+
+const { notes, operation } = await ecash.send(quote)
+showToRecipient(notes.display())
+const final = await operation.awaitFinal()
+```
+
+**Used in.** [Send, step 02](send.md#step-02)
+
+---
+
+# EcashLike.receive
+
+```ts
+receive(notes: NotesLike): Promise<EcashReceiveOperationLike>
+```
+
+Redeems ecash notes.
+
+**Parameters**
+
+| Name    | Type        | Description                                       |
+| ------- | ----------- | ------------------------------------------------- |
+| `notes` | `NotesLike` | The notes to redeem. Get them from `Notes.parse`. |
+
+**Returns.** `EcashReceiveOperationLike`. The redeem operation. Follow it with `updates()` or `awaitFinal()`.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`Recovering`](errors.md#code-recovering), [`NotSupported`](errors.md#code-notsupported), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means malformed notes, or notes from another federation.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { Notes, type EcashLike } from '@fedimint/react-native'
+
+declare const ecash: EcashLike
+declare const pasted: string
+
+const operation = await ecash.receive(Notes.parse(pasted.trim()))
+console.log((await operation.awaitFinal()).tag)
+```
+
+**Used in.** [Receive, step 02](receive.md#step-02)
+
+---
+
+# EcashQuoteLike.requestedAmount
+
+```ts
+requestedAmount(): Amount
+```
+
+Gives the amount that was asked for. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The amount that was asked for. It is a floor. It is not the amount the balance moves by.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashQuoteLike } from '@fedimint/react-native'
+
+declare const quote: EcashQuoteLike
+
+const msat = quote.requestedAmount()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 01](send.md#step-01)
+
+---
+
+# EcashQuoteLike.notesValue
+
+```ts
+notesValue(): Amount
+```
+
+Gives the value of the notes in the quote. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The value the notes carry. It is at or above the requested amount.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashQuoteLike } from '@fedimint/react-native'
+
+declare const quote: EcashQuoteLike
+
+const msat = quote.notesValue()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 01](send.md#step-01)
+
+---
+
+# EcashQuoteLike.fee
+
+```ts
+fee(): Amount
+```
+
+Gives the `fee` of the quote. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The extra cost on top of `notesValue`. It is always zero today.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashQuoteLike } from '@fedimint/react-native'
+
+declare const quote: EcashQuoteLike
+
+const msat = quote.fee()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 01](send.md#step-01)
+
+---
+
+# EcashQuoteLike.total
+
+```ts
+total(): Amount
+```
+
+Gives the total cost of the quote. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. `notesValue` plus `fee`. The balance moves by this amount.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashQuoteLike } from '@fedimint/react-native'
+
+declare const quote: EcashQuoteLike
+
+const msat = quote.total()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 01](send.md#step-01)
+
+---
+
+# LightningLike.quote
+
+```ts
+quote(invoice: Bolt11Invoice): Promise<LnQuoteLike>
+```
+
+Plans the payment of an invoice. Nothing is debited.
+
+**Parameters**
+
+| Name      | Type            | Description                                                            |
+| --------- | --------------- | ---------------------------------------------------------------------- |
+| `invoice` | `Bolt11Invoice` | The invoice to pay. It must name an amount. Bolt11Invoice is a string. |
+
+**Returns.** `LnQuoteLike`. A frozen payment plan: the invoice amount, the `fee`, the route and the total.
+
+**Throws.** [`AmountlessInvoice`](errors.md#code-amountlessinvoice), [`NetworkMismatch`](errors.md#code-networkmismatch), [`InvalidInput`](errors.md#code-invalidinput), [`GatewayUnavailable`](errors.md#code-gatewayunavailable), [`InsufficientBalance`](errors.md#code-insufficientbalance), [`Recovering`](errors.md#code-recovering), [`NotSupported`](errors.md#code-notsupported), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Internal`](errors.md#code-internal), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means an expired invoice.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { Bolt11Invoice, LightningLike } from '@fedimint/react-native'
+
+declare const ln: LightningLike
+declare const invoice: Bolt11Invoice
+
+const quote = await ln.quote(invoice)
+console.log(quote.total())
+```
+
+**Used in.** [Send, step 04](send.md#step-04)
+
+---
+
+# LightningLike.send
+
+```ts
+send(quote: LnQuoteLike): Promise<LnSendOperationLike>
+```
+
+Pays the invoice of a quote.
+
+**Parameters**
+
+| Name    | Type          | Description                                                                |
+| ------- | ------------- | -------------------------------------------------------------------------- |
+| `quote` | `LnQuoteLike` | The quote to pay. A quote that was already sent fails with `QuoteExpired`. |
+
+**Returns.** `LnSendOperationLike`. The operation. It returns when the payment has started, not when it ends. The final state is `Success`, `Refunded` or `Failed`.
+
+**Throws.** [`QuoteExpired`](errors.md#code-quoteexpired), [`QuoteChanged`](errors.md#code-quotechanged), [`NetworkMismatch`](errors.md#code-networkmismatch), [`InsufficientBalance`](errors.md#code-insufficientbalance), [`GatewayUnavailable`](errors.md#code-gatewayunavailable), [`Recovering`](errors.md#code-recovering), [`NotSupported`](errors.md#code-notsupported), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Storage`](errors.md#code-storage), [`Internal`](errors.md#code-internal), [`FederationClosed`](errors.md#code-federationclosed).
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { LightningLike, LnQuoteLike } from '@fedimint/react-native'
+
+declare const ln: LightningLike
+declare const quote: LnQuoteLike
+
+const operation = await ln.send(quote)
+console.log((await operation.awaitFinal()).tag)
+```
+
+**Used in.** [Send, step 05](send.md#step-05)
+
+---
+
+# LightningLike.receive
+
+```ts
+receive(amount: Amount, description: string): Promise<LnReceiveHandle>
+```
+
+Creates an invoice that the wallet can get paid on.
+
+**Parameters**
+
+| Name          | Type     | Description                                |
+| ------------- | -------- | ------------------------------------------ |
+| `amount`      | `Amount` | The amount to ask for, in msat (a bigint). |
+| `description` | `string` | The text inside the invoice.               |
+
+**Returns.** `LnReceiveHandle`. An object with the invoice to show the payer and the operation to follow.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput), [`GatewayUnavailable`](errors.md#code-gatewayunavailable), [`Recovering`](errors.md#code-recovering), [`NotSupported`](errors.md#code-notsupported), [`FederationUnreachable`](errors.md#code-federationunreachable), [`Timeout`](errors.md#code-timeout), [`Storage`](errors.md#code-storage), [`Internal`](errors.md#code-internal), [`FederationClosed`](errors.md#code-federationclosed). InvalidInput means a zero amount, a bad description, or an amount too small for the fee.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { LightningLike } from '@fedimint/react-native'
+
+declare const ln: LightningLike
+
+const { invoice, operation } = await ln.receive(5000n, 'Coffee') // 5 sats, in msat
+console.log(invoice, operation !== undefined)
+```
+
+**Used in.** [Receive, step 03](receive.md#step-03)
+
+---
+
+# LnQuoteLike.invoiceAmount
+
+```ts
+invoiceAmount(): Amount
+```
+
+Gives the amount of the invoice. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. What reaches the payee.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { LnQuoteLike } from '@fedimint/react-native'
+
+declare const quote: LnQuoteLike
+
+const msat = quote.invoiceAmount()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 04](send.md#step-04)
+
+---
+
+# LnQuoteLike.fee
+
+```ts
+fee(): Amount
+```
+
+Gives the `fee` of the payment. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The whole extra cost.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { LnQuoteLike } from '@fedimint/react-native'
+
+declare const quote: LnQuoteLike
+
+const msat = quote.fee()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 04](send.md#step-04)
+
+---
+
+# LnQuoteLike.total
+
+```ts
+total(): Amount
+```
+
+Gives the total cost of the payment. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. `invoiceAmount` plus `fee`. This is the exact debit.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { LnQuoteLike } from '@fedimint/react-native'
+
+declare const quote: LnQuoteLike
+
+const msat = quote.total()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Send, step 04](send.md#step-04)
+
+---
+
+# EcashSendOperationLike.state
+
+```ts
+state(): Promise<EcashSendState>
+```
+
+Reads the current state of the operation.
+
+**Parameters.** None.
+
+**Returns.** `EcashSendState`. The current state. A failed operation is a failure state, not an error.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed), [`Internal`](errors.md#code-internal). This method never returns UnsupportedOperation.
+
+**Example**
+
+`example.ts`
+
+```ts
+import {
+  EcashSendState,
+  type EcashSendOperationLike,
+} from '@fedimint/react-native'
+
+declare const operation: EcashSendOperationLike
+
+const state = await operation.state()
+console.log(EcashSendState[state])
+```
+
+**Used in.** [History, step 04](history.md#step-04)
+
+---
+
+# EcashSendOperationLike.updates
+
+```ts
+updates(): EcashSendOperationUpdatesLike
+```
+
+Opens a cursor on the states of the operation. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `EcashSendOperationUpdatesLike`. A cursor. Its `next()` gives Promise&lt;State | `undefined`&gt;: the current state first, then each change, and `undefined` at the clean end.
+
+**Throws.** Not verified. The next() call gives Storage, FederationClosed or Internal.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashSendOperationLike } from '@fedimint/react-native'
+
+declare const operation: EcashSendOperationLike
+
+const updates = operation.updates()
+const state = await updates.next()
+console.log(state)
+```
+
+**Used in.** [Receive, step 02](receive.md#step-02), [Receive, step 04](receive.md#step-04), [Restore, step 03](restore.md#step-03)
+
+---
+
+# EcashSendOperationLike.awaitFinal
+
+```ts
+awaitFinal(): Promise<EcashSendState>
+```
+
+Waits for the final state of the operation.
+
+**Parameters.** None.
+
+**Returns.** `EcashSendState`. The final state. A failed payment resolves with a failure state.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed), [`Internal`](errors.md#code-internal). FederationClosed means the federation closed while the operation was pending.
+
+**Example**
+
+`example.ts`
+
+```ts
+import {
+  EcashSendState,
+  type EcashSendOperationLike,
+} from '@fedimint/react-native'
+
+declare const operation: EcashSendOperationLike
+
+const final = await operation.awaitFinal()
+console.log(final === EcashSendState.Redeemed ? 'redeemed' : 'canceled')
+```
+
+**Used in.** [Send, step 03](send.md#step-03), [Send, step 05](send.md#step-05), [Receive, step 02](receive.md#step-02), [Restore, step 03](restore.md#step-03)
+
+---
+
+# EcashSendOperationLike.requestCancel
+
+```ts
+requestCancel(): Promise<void>
+```
+
+Asks to take back the ecash of a send.
+
+**Parameters.** None.
+
+**Returns.** `Promise<void>`. Resolves when the cancel request is saved to storage. The outcome comes later, as the state `Canceled` or `Redeemed`. On a final state the call does nothing and does not fail.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed). This method never returns FederationUnreachable or Timeout.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashSendOperationLike } from '@fedimint/react-native'
+
+declare const operation: EcashSendOperationLike
+
+await operation.requestCancel()
+```
+
+**Used in.** [Send, step 03](send.md#step-03)
+
+---
+
+# AnyOperationLike.asEcashSend
+
+```ts
+asEcashSend(): EcashSendOperationLike | undefined
+```
+
+Turns an untyped operation into an ecash send handle. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `EcashSendOperationLike | undefined`. A typed handle when the operation is an ecash send. Otherwise `undefined`.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { AnyOperationLike } from '@fedimint/react-native'
+
+declare const any: AnyOperationLike
+
+const send = any.asEcashSend()
+if (send) console.log(await send.state())
+```
+
+**Used in.** [History, step 04](history.md#step-04)
+
+---
+
+# AnyOperationLike.kind
+
+```ts
+kind(): OperationKind
+```
+
+Tells the kind of an operation. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `OperationKind`. The kind of the operation. An unknown record gives `OperationKind.Unknown`.
+
+**Throws.** None. The method never fails.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { OperationKind, type AnyOperationLike } from '@fedimint/react-native'
+
+declare const any: AnyOperationLike
+
+const kind = any.kind()
+console.log(OperationKind[kind])
+```
+
+**Used in.** [History, step 04](history.md#step-04)
+
+---
+
+# EcashSendOperationLike.details
+
+```ts
+details(): Promise<EcashSendDetails>
+```
+
+Reads the details of an ecash send.
+
+**Parameters.** None.
+
+**Returns.** `EcashSendDetails`. The details of the send.
+
+**Throws.** [`Storage`](errors.md#code-storage), [`FederationClosed`](errors.md#code-federationclosed), [`Internal`](errors.md#code-internal).
+
+The string is bearer money. Whoever has it can redeem it. Show it only to the recipient, and never log it, store it in plain text or send it to analytics.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { EcashSendOperationLike } from '@fedimint/react-native'
+
+declare const operation: EcashSendOperationLike
+declare function showToRecipient(text: string): void
+
+const details = await operation.details()
+showToRecipient(details.notes.display())
+```
+
+**Used in.** [History, step 04](history.md#step-04)
+
+---
+
+# InviteCode.parse
+
+```ts
+InviteCode.parse(code: string): InviteCodeLike
+```
+
+Checks an invite `code` string and gives you a checked invite `code`. Synchronous.
+
+**Parameters**
+
+| Name   | Type     | Description           |
+| ------ | -------- | --------------------- |
+| `code` | `string` | The `fed1...` string. |
+
+**Returns.** `InviteCodeLike`. A checked invite `code`.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput). InvalidInput means a malformed value. The error does not echo the string back.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { InviteCode } from '@fedimint/react-native'
+
+declare const pasted: string
+
+const invite = InviteCode.parse(pasted.trim())
+console.log(invite.federationId())
+```
+
+**Used in.** [Join, step 01](join.md#step-01), [Quickstart, step 02](quickstart.md#step-02), [Errors, step 01](errors.md#step-01), [Restore, step 03](restore.md#step-03), [Receive (prose)](receive.md)
+
+---
+
+# InviteCodeLike.federationId
+
+```ts
+federationId(): FederationId
+```
+
+Reads the `federation` id from the invite `code`. It makes no network call. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `FederationId`. The id of the `federation` that the `code` names.
+
+**Throws.** Not verified.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { InviteCodeLike } from '@fedimint/react-native'
+
+declare const invite: InviteCodeLike
+
+const id = invite.federationId()
+console.log(id)
+```
+
+**Used in.** [Quickstart, step 02](quickstart.md#step-02), [Join, step 01](join.md#step-01)
+
+---
+
+# Notes.parse
+
+```ts
+Notes.parse(notes: string): NotesLike
+```
+
+Checks an ecash string and gives you checked notes. Synchronous.
+
+**Parameters**
+
+| Name    | Type     | Description                     |
+| ------- | -------- | ------------------------------- |
+| `notes` | `string` | The ecash string from a sender. |
+
+**Returns.** `NotesLike`. Checked notes.
+
+**Throws.** [`InvalidInput`](errors.md#code-invalidinput). InvalidInput means a malformed value.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { Notes } from '@fedimint/react-native'
+
+declare const pasted: string
+
+const notes = Notes.parse(pasted.trim())
+console.log(notes.value())
+```
+
+**Used in.** [Receive, step 01](receive.md#step-01), [Receive, step 02](receive.md#step-02)
+
+---
+
+# NotesLike.value
+
+```ts
+value(): Amount
+```
+
+Reads the value inside the notes. It makes no network call. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Amount`. The value in the notes. This does not prove that the notes are still unspent.
+
+**Throws.** Not verified.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { NotesLike } from '@fedimint/react-native'
+
+declare const notes: NotesLike
+
+const msat = notes.value()
+console.log(`${msat / 1000n} sats`)
+```
+
+**Used in.** [Receive, step 01](receive.md#step-01), [Send, step 02](send.md#step-02), [History, step 04](history.md#step-04)
+
+---
+
+# NotesLike.display
+
+```ts
+display(): string
+```
+
+Gives the string to hand over. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `string`. The ecash string for the notes.
+
+**Throws.** Not verified.
+
+The string is bearer money. Whoever has it can redeem it. Show it only to the recipient, and never log it, store it in plain text or send it to analytics.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { NotesLike } from '@fedimint/react-native'
+
+declare const notes: NotesLike
+declare function showToRecipient(text: string): void
+
+const text = notes.display()
+showToRecipient(text)
+```
+
+**Used in.** [Receive, step 01](receive.md#step-01), [Send, step 02](send.md#step-02), [History, step 04](history.md#step-04)
+
+---
+
+# MnemonicLike.words
+
+```ts
+words(): Array<string>
+```
+
+Reads the seed `words`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `Array<string>`. The seed `words`, in order. This call is the deliberate act of taking the seed out of the SDK.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { MnemonicLike } from '@fedimint/react-native'
+
+declare const mnemonic: MnemonicLike
+
+const words = mnemonic.words()
+console.log(words.length)
+```
+
+**Used in.** [Seed words, step 02](seed-words.md#step-02), [Restore, step 02](restore.md#step-02), [Installation, step 06](installation.md#step-06)
+
+---
+
+# Exception.hasInner
+
+```ts
+Exception.hasInner(obj_: any): obj_ is UniffiThrownObject<Exception>
+```
+
+This block has data-verify="none" because UniffiThrownObject comes from `@ubjs/core`. The package does not export it.
+
+Tells whether a caught value carries an SDK `Exception`. Synchronous.
+
+**Parameters**
+
+| Name   | Type  | Description       |
+| ------ | ----- | ----------------- |
+| `obj_` | `any` | The caught value. |
+
+**Returns.** `boolean (type guard)`. True when the caught value carries an SDK `Exception`.
+
+**Throws.** Not verified.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { Exception } from '@fedimint/react-native'
+
+declare const err: unknown
+
+if (Exception.hasInner(err)) {
+
+  console.log(Exception.getInner(err).reason())
+}
+```
+
+**Used in.** [Errors, step 01](errors.md#step-01), [Quickstart, step 02](quickstart.md#step-02), [Join, step 01](join.md#step-01), [Send, step 02](send.md#step-02), [Send, step 04](send.md#step-04), [Restore, step 02](restore.md#step-02), [Session, step 03](session.md#step-03), [Installation, step 06](installation.md#step-06)
+
+---
+
+# Exception.getInner
+
+```ts
+Exception.getInner(err: UniffiThrownObject<Exception>): Exception
+```
+
+This block has data-verify="none" because UniffiThrownObject comes from `@ubjs/core`. The package does not export it.
+
+Gives the `Exception` inside a caught value. Synchronous.
+
+**Parameters**
+
+| Name  | Type                            | Description                     |
+| ----- | ------------------------------- | ------------------------------- |
+| `err` | `UniffiThrownObject<Exception>` | A value that passed `hasInner`. |
+
+**Returns.** `Exception`. The SDK exception object.
+
+**Throws.** Not verified.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { Exception } from '@fedimint/react-native'
+
+declare const err: unknown
+
+if (Exception.hasInner(err)) {
+  const inner = Exception.getInner(err)
+  console.log(inner.code())
+}
+```
+
+**Used in.** [Errors, step 01](errors.md#step-01), [Quickstart, step 02](quickstart.md#step-02), [Join, step 01](join.md#step-01), [Send, step 02](send.md#step-02), [Send, step 04](send.md#step-04), [Restore, step 02](restore.md#step-02), [Session, step 03](session.md#step-03), [Installation, step 06](installation.md#step-06)
+
+---
+
+# ExceptionLike.code
+
+```ts
+code(): ErrorCode
+```
+
+Gives the stable error `code`. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `ErrorCode`. The stable `code`. Branch on it.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import { ErrorCode, type ExceptionLike } from '@fedimint/react-native'
+
+declare const inner: ExceptionLike
+
+const code = inner.code()
+console.log(ErrorCode[code])
+```
+
+**Used in.** [Errors, step 01](errors.md#step-01)
+
+---
+
+# ExceptionLike.reason
+
+```ts
+reason(): string
+```
+
+Gives the human message. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `string`. The human message. Never parse it. Branch on `code()`.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { ExceptionLike } from '@fedimint/react-native'
+
+declare const inner: ExceptionLike
+
+const reason = inner.reason()
+console.log(reason)
+```
+
+**Used in.** [Errors, step 01](errors.md#step-01), [Quickstart, step 02](quickstart.md#step-02), [Installation, step 06](installation.md#step-06)
+
+---
+
+# ExceptionLike.details
+
+```ts
+details(): RawErrorDetails | undefined
+```
+
+Gives the structured detail of the failure, where there is any. Synchronous.
+
+**Parameters.** None.
+
+**Returns.** `RawErrorDetails | undefined`. The structured detail, or `undefined`.
+
+**Throws.** None.
+
+**Example**
+
+`example.ts`
+
+```ts
+import type { ExceptionLike } from '@fedimint/react-native'
+
+declare const inner: ExceptionLike
+
+const details = inner.details()
+console.log(details?.kind)
+```
+
+**Used in.** [Errors, step 01](errors.md#step-01)
